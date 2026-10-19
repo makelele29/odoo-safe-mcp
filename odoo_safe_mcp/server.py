@@ -34,8 +34,8 @@ except ImportError:
         instructions="Deterministic security firewall & MCP server for Odoo ERP with Human-in-the-Loop protection.",
     )
 
-# Cached UID for JSON-RPC authentication
-_CACHED_UID: Optional[int] = None
+# Cached UIDs keyed by (url, db, username) to prevent cross-tenant UID collisions
+_UID_CACHE: Dict[ tuple[str, str, str], int ] = {}
 
 
 def get_config() -> Dict[str, str]:
@@ -134,10 +134,10 @@ async def _get_authenticated_uid(
     client: httpx.AsyncClient,
     cfg: Dict[str, str],
 ) -> int:
-    """Authenticate with Odoo and return user ID (UID)."""
-    global _CACHED_UID
-    if _CACHED_UID:
-        return _CACHED_UID
+    """Authenticate with Odoo and return user ID (UID) scoped to (url, db, username)."""
+    cache_key = (cfg["url"], cfg["db"], cfg["username"])
+    if cache_key in _UID_CACHE:
+        return _UID_CACHE[cache_key]
 
     auth_response = await _odoo_jsonrpc_call(
         client=client,
@@ -151,8 +151,8 @@ async def _get_authenticated_uid(
         raise PermissionError(
             f"Authentication failed for user '{cfg['username']}' on database '{cfg['db']}'."
         )
-    _CACHED_UID = int(uid)
-    return _CACHED_UID
+    _UID_CACHE[cache_key] = int(uid)
+    return _UID_CACHE[cache_key]
 
 
 async def _execute_local_odoo(
@@ -282,8 +282,8 @@ async def odoo_execute_kw(
                 cfg=cfg,
                 model=model,
                 method=method,
-                args=norm_args,
-                kwargs=norm_kwargs,
+                args=eval_res.sanitized_args,
+                kwargs=eval_res.sanitized_kwargs,
             )
             return json.dumps(result, indent=2, default=str)
         except Exception as exc:

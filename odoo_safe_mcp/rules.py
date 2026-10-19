@@ -5,7 +5,7 @@ Classifies Odoo RPC calls into:
   - GREEN: Safe Read (Free Open Source, instant local JSON-RPC execution)
   - YELLOW: Guarded Drafts (Forces state='draft' and Chatter audit note)
   - RED: Critical / Destructive / Unknown / Wizards (Requires human Slack approval)
-  - FORBIDDEN / BLOCKED: Permanent lockdown for sensitive models (res.users, ir.rule, etc.)
+  - FORBIDDEN / BLOCKED: Permanent lockdown for sensitive models (res.users, ir.config_parameter, etc.)
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class RiskLevel(str, Enum):
     FORBIDDEN = "FORBIDDEN"  # Forbidden operation (res.users, security models)
 
 
-# Methods safe for read-only consumption
+# Methods safe for read-only consumption on non-sensitive business models
 GREEN_METHODS = {
     "search",
     "read",
@@ -41,21 +41,45 @@ GREEN_METHODS = {
     "load_views",
 }
 
-# Critical system models where mutations (or credential reading) are strictly forbidden
-PROTECTED_SYSTEM_MODELS = {
+# Models where ANY access (even READ) is strictly forbidden to prevent credential/secret exfiltration
+READ_AND_WRITE_FORBIDDEN_MODELS = {
     "res.users",
+    "res.apikeys",
+    "ir.config_parameter",
+    "ir.mail_server",
+    "fetchmail.server",
+    "payment.provider",
+    "payment.acquirer",
+    "payment.token",
+}
+
+# Critical system models where mutations (create/write/unlink/custom) are strictly forbidden
+PROTECTED_SYSTEM_MODELS = READ_AND_WRITE_FORBIDDEN_MODELS | {
     "res.groups",
     "ir.model.access",
     "ir.rule",
-    "ir.config_parameter",
     "ir.module.module",
     "ir.actions.server",
     "ir.cron",
     "base.automation",
+    "ir.model",
+    "ir.model.fields",
+    "ir.ui.view",
 }
 
 # Backward compatibility alias
 BLACKLIST_MODELS = PROTECTED_SYSTEM_MODELS
+
+# Sensitive field names that must never be read via fields list
+FORBIDDEN_SENSITIVE_FIELDS = {
+    "password",
+    "password_crypt",
+    "api_key",
+    "totp_secret",
+    "oauth_access_token",
+    "smtp_pass",
+    "stripe_secret_key",
+}
 
 # Strict Whitelist: Only these models can be created under YELLOW (Guarded Drafts)
 YELLOW_CREATE_MODELS = {
@@ -76,6 +100,8 @@ CRITICAL_RED_METHODS = {
     "button_immediate_transfer",
     "button_approve",
     "copy",
+    "web_save",
+    "name_create",
 }
 
 UPGRADE_URL = "https://tudominio.com/pricing"
@@ -105,32 +131,66 @@ class RuleEvaluationResult:
         }
 
 
+def _enforce_draft_on_dict(item: Dict[str, Any], model: str) -> None:
+    if model in {"sale.order", "purchase.order"}:
+        item["state"] = "draft"
+
+
 def _sanitize_yellow_payload(
     model: str, method: str, args: List[Any], kwargs: Dict[str, Any]
 ) -> Tuple[List[Any], Dict[str, Any], str]:
     """
-    Enforces state='draft' for sales and purchase orders and prepares
-    the audit note for Odoo Chatter.
+    Enforces state='draft' for sales and purchase orders across positional args,
+    keyword vals/vals_list, and context default_state to prevent bypasses.
     """
     new_args = copy.deepcopy(args)
     new_kwargs = copy.deepcopy(kwargs)
     audit_note = f"[Odoo Safe MCP] Created via AI Agent ({model}.{method}) under Guarded Drafts policy."
 
-    if method == "create" and new_args:
-        first_arg = new_args[0]
-        if isinstance(first_arg, dict):
-            # Enforce draft state where applicable
-            if model in {"sale.order", "purchase.order"}:
-                first_arg["state"] = "draft"
-            new_args[0] = first_arg
-        elif isinstance(first_arg, list):
-            # Batch creation support (Odoo 14+)
-            for item in first_arg:
-                if isinstance(item, dict) and model in {"sale.order", "purchase.order"}:
-                    item["state"] = "draft"
-            new_args[0] = first_arg
+    if method == "create":
+        # 1. Sanitize positional args[0]
+        if new_args:
+            first_arg = new_args[0]
+            if isinstance(first_arg, dict):
+                _enforce_draft_on_dict(first_arg, model)
+                new_args[0] = first_arg
+            elif isinstance(first_arg, list):
+                for item in first_arg:
+                    if isinstance(item, dict):
+                        _enforce_draft_on_dict(item, model)
+                new_args[0] = first_arg
+
+        # 2. Sanitize kwargs['vals'] or kwargs['vals_list'] (prevents kwargs bypass)
+        if isinstance(new_kwargs.get("vals"), dict):
+            _enforce_draft_on_dict(new_kwargs["vals"], model)
+        elif isinstance(new_kwargs.get("vals"), list):
+            for item in new_kwargs["vals"]:
+                if isinstance(item, dict):
+                    _enforce_draft_on_dict(item, model)
+
+        if isinstance(new_kwargs.get("vals_list"), list):
+            for item in new_kwargs["vals_list"]:
+                if isinstance(item, dict):
+                    _enforce_draft_on_dict(item, model)
+
+        # 3. Sanitize kwargs['context']['default_state']
+        if isinstance(new_kwargs.get("context"), dict) and model in {"sale.order", "purchase.order"}:
+            if "default_state" in new_kwargs["context"]:
+                new_kwargs["context"]["default_state"] = "draft"
 
     return new_args, new_kwargs, audit_note
+
+
+def _sanitize_green_read_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip any forbidden credential fields from 'fields' parameter in read/search_read."""
+    new_kwargs = copy.deepcopy(kwargs)
+    fields_param = new_kwargs.get("fields")
+    if isinstance(fields_param, list):
+        new_kwargs["fields"] = [
+            f for f in fields_param
+            if isinstance(f, str) and f.strip().lower() not in FORBIDDEN_SENSITIVE_FIELDS
+        ]
+    return new_kwargs
 
 
 def evaluate_odoo_call(
@@ -150,22 +210,37 @@ def evaluate_odoo_call(
     norm_model = (model or "").strip().lower()
     norm_method = (method or "").strip().lower()
 
-    # 1. FORBIDDEN: Block reading or writing res.users to prevent exfiltrating passwords, tokens, or hashes
-    if norm_model == "res.users":
+    # 0. Block empty or private/dunder method calls (e.g. '_check_credentials', '__import__')
+    if not norm_model or not norm_method or norm_method.startswith("_"):
         return RuleEvaluationResult(
             level=RiskLevel.FORBIDDEN,
             allowed=False,
             requires_guard_proxy=False,
             reason=(
-                "⛔ SECURITY ALERT: Direct access to 'res.users' is permanently FORBIDDEN "
-                "by Odoo Safe MCP to prevent password/token exfiltration or privilege escalation."
+                f"⛔ SECURITY ALERT: Calling private or invalid method '{method}' on '{model}' "
+                "is permanently FORBIDDEN."
             ),
             sanitized_args=args,
             sanitized_kwargs=kwargs,
             inject_chatter_note=False,
         )
 
-    # 2. FORBIDDEN: Prevent mutation of access control, groups, modules, automations and crons
+    # 1. FORBIDDEN: Block reading OR writing secret/credential models (res.users, ir.config_parameter, etc.)
+    if norm_model in READ_AND_WRITE_FORBIDDEN_MODELS:
+        return RuleEvaluationResult(
+            level=RiskLevel.FORBIDDEN,
+            allowed=False,
+            requires_guard_proxy=False,
+            reason=(
+                f"⛔ SECURITY ALERT: Direct access to sensitive model '{norm_model}' is permanently FORBIDDEN "
+                "by Odoo Safe MCP to prevent credential/token exfiltration or privilege escalation."
+            ),
+            sanitized_args=args,
+            sanitized_kwargs=kwargs,
+            inject_chatter_note=False,
+        )
+
+    # 2. FORBIDDEN: Prevent mutation of access control, groups, modules, views, automations and crons
     if norm_model in PROTECTED_SYSTEM_MODELS:
         if norm_method not in GREEN_METHODS:
             return RuleEvaluationResult(
@@ -200,18 +275,19 @@ def evaluate_odoo_call(
 
     # 4. GREEN TIER: Safe Read Operations on standard business models
     if norm_method in GREEN_METHODS:
+        san_kwargs = _sanitize_green_read_kwargs(kwargs)
         return RuleEvaluationResult(
             level=RiskLevel.GREEN,
             allowed=True,
             requires_guard_proxy=False,
             reason="Safe read-only operation. Executed instantly via local JSON-RPC.",
             sanitized_args=args,
-            sanitized_kwargs=kwargs,
+            sanitized_kwargs=san_kwargs,
             inject_chatter_note=False,
         )
 
     # 5. RED TIER: All other mutations, accounting, deletions, wizards, or unknown methods (Fail-safe to RED)
-    is_critical = norm_method in CRITICAL_RED_METHODS or norm_model == "account.move"
+    is_critical = norm_method in CRITICAL_RED_METHODS or norm_model.startswith("account.")
     reason = (
         f"Critical operation ('{norm_model}.{norm_method}'): Human-in-the-Loop approval required via Slack."
         if is_critical
