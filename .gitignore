@@ -1,0 +1,33 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+.eggs/
+
+# Environments
+.env
+.venv/
+env/
+venv/
+ENV/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Editor directories
+.vscode/
+.idea/
+*.swp
+
+# Private Enterprise SaaS Repository (Never push to Public PyPI Repo)
+odoo-safe-guard-enterprise/
+.dev.vars
+node_modules/
+backup_*.sql
