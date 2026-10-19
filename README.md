@@ -84,10 +84,12 @@ Need your agents to create draft quotes, prepare vendor bills, audit payloads wi
 
 Distributed under the **MIT License** — Free forever for read-only local execution and Dry-Run simulation.
 
-### Limitation of Liability & Warranty Disclaimer
+### Limitation of Liability, GDPR Privacy & Trademark Disclaimer
 > **IMPORTANT NOTICE:** `odoo-safe-mcp` and its associated Enterprise Guard backend are provided on an **"AS IS" and "AS AVAILABLE"** basis without warranties of any kind, either express or implied, including but not limited to implied warranties of merchantability, fitness for a particular purpose, and non-infringement.
 >
-> 1. **Auxiliary Control Layer:** This software operates as an auxiliary deterministic filter and does not replace native database security, accounting audits, or operational vigilance.
+> 1. **Auxiliary Control Layer & Human-in-the-Loop Responsibility:** This software operates strictly as an auxiliary deterministic filter and does not replace native database security, accounting audits, or operational vigilance. The human supervisor who clicks **"Approve"** in Slack or Microsoft Teams is the sole legal and accounting authorizer of the resulting ERP mutation.
 > 2. **Customer Responsibilities:** The user and customer retain sole and exclusive responsibility for configuring least-privilege permissions on the Odoo user account linked to `ODOO_API_KEY`, monitoring AI agent behavior, and maintaining independent, verified daily database backups.
 > 3. **Liability Cap:** To the maximum extent permitted by applicable law, the cumulative aggregate liability of the authors, contributors, and operators for any direct, indirect, incidental, special, or consequential damages (including data loss, accounting discrepancy, lost revenue, or business interruption) shall be strictly capped at the total fee actually paid by the customer for the software during the **one (1) month immediately preceding the event** giving rise to liability (maximum €49 for Pro Guard, €149 for Partner Agency, or €0 for Community Tier).
+> 4. **GDPR / RGPD Zero-Data-Retention Architecture:** Read-only (`GREEN`) queries execute locally on the user's machine and never transit through the Enterprise Guard cloud. Paused (`RED`) payloads are encrypted in transit and at rest using `AES-GCM-256` and are **purged immediately (`PURGED_AFTER_RESOLUTION`)** upon approval, rejection, or 24-hour TTL expiration. Audit logs store only cryptographic `SHA-256` payload hashes and technical metadata.
+> 5. **Trademark & Non-Affiliation Disclaimer:** This project is an independent software product and is **not affiliated with, sponsored by, or endorsed by Odoo S.A.** `Odoo` is a registered trademark of Odoo S.A. `Slack` is a registered trademark of Slack Technologies, LLC. `Microsoft Teams` is a registered trademark of Microsoft Corporation.
 
