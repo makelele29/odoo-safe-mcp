@@ -10,7 +10,7 @@ readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 authors = [
-    { name = "Odoo Safe MCP", email = "soporte@tudominio.com" }
+    { name = "Odoo Safe MCP", email = "soporte@odoosafemcp.stream" }
 ]
 keywords = [
     "odoo",
@@ -44,11 +44,11 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://tudominio.com"
-Documentation = "https://tudominio.com/docs"
+Homepage = "https://odoosafemcp.stream"
+Documentation = "https://odoosafemcp.stream/#how"
 Repository = "https://github.com/tu-usuario/odoo-safe-mcp"
 "Bug Tracker" = "https://github.com/tu-usuario/odoo-safe-mcp/issues"
-"Get Pro API Key" = "https://tudominio.com/pricing"
+"Get Pro API Key" = "https://odoosafemcp.stream/#pricing"
 
 [project.scripts]
 odoo-safe-mcp = "odoo_safe_mcp.server:main"

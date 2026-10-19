@@ -104,7 +104,7 @@ CRITICAL_RED_METHODS = {
     "name_create",
 }
 
-UPGRADE_URL = "https://tudominio.com/pricing"
+UPGRADE_URL = "https://odoosafemcp.stream/#pricing"
 
 
 @dataclass

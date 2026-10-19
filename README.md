@@ -74,7 +74,7 @@ Need your agents to create draft quotes, prepare vendor bills, audit payloads wi
 | **Pro Guard** | **€49 / month** | Up to 5 DBs | Guarded Drafts (🟡 Yellow), Slack Interactive Approvals (🔴 Red), D1 Audit Log, **Llama 3 8B AI Defender Included** |
 | **Partner Agency** | **€149 / month** | Up to 25 DBs | Multi-tenant Agency Isolation, Custom Slack Signing Secret, MS Teams Alerts, Llama 3 AI Defender |
 
-1. Get your **License Key** at **[tudominio.com/pricing](https://tudominio.com/pricing)**.
+1. Get your **License Key** at **[odoosafemcp.stream/#pricing](https://odoosafemcp.stream/#pricing)**.
 2. Connect your Slack webhook in 1 click via the Cloudflare D1 Activation Portal.
 3. Add `ODOO_SAFE_GUARD_KEY` to your environment variables.
 

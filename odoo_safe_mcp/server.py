@@ -44,7 +44,7 @@ def get_config() -> Dict[str, str]:
     raw_guard_url = (
         os.getenv("ODOO_GUARD_PROXY_URL")
         or os.getenv("ODOO_GUARD_URL")
-        or "https://api.tudominio.com/v1/guard"
+        or "https://odoosafemcp.stream/v1/guard"
     ).strip()
     if raw_guard_url and not raw_guard_url.endswith("/v1/guard"):
         guard_url = f"{raw_guard_url.rstrip('/')}/v1/guard"
@@ -235,7 +235,7 @@ async def _forward_to_guard_proxy(
         if resp.status_code in (401, 403):
             return (
                 "❌ Pro Guard License Error: Your ODOO_SAFE_GUARD_KEY is invalid, expired, "
-                "or not authorized. Visit https://tudominio.com/pricing to renew or get a license."
+                "or not authorized. Visit https://odoosafemcp.stream/#pricing to renew or get a license."
             )
         resp.raise_for_status()
         try:

@@ -37,7 +37,7 @@ class TestServerExecutionKW:
             args=[{"partner_id": 1}],
         )
         assert "Strict Read-Only Mode" in res
-        assert "tudominio.com/pricing" in res
+        assert "odoosafemcp.stream/#pricing" in res
 
     async def test_blacklisted_model_always_blocked(self, monkeypatch):
         monkeypatch.setenv("ODOO_SAFE_GUARD_KEY", "pro_guard_license_key")
