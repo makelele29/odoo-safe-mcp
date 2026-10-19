@@ -103,3 +103,36 @@ class TestServerExecutionKW:
             assert data["status"] == "success"
             assert data["id"] == 105
             mock_guard.assert_called_once()
+
+    async def test_dry_run_mode_simulates_mutations(self, monkeypatch):
+        monkeypatch.setenv("ODOO_DRY_RUN", "true")
+        monkeypatch.delenv("ODOO_SAFE_GUARD_KEY", raising=False)
+
+        res = await odoo_execute_kw(
+            model="sale.order",
+            method="create",
+            args=[{"partner_id": 1, "state": "sale"}],
+        )
+        data = json.loads(res)
+        assert data["status"] == "DRY_RUN_SIMULATION"
+        assert data["executed_in_odoo"] is False
+        assert data["risk_level"] == "YELLOW"
+        assert data["sanitized_args"][0]["state"] == "draft"
+
+    async def test_error_message_scrubs_secrets(self, monkeypatch):
+        monkeypatch.setenv("ODOO_URL", "https://example.odoo.com")
+        monkeypatch.setenv("ODOO_DB", "demo")
+        monkeypatch.setenv("ODOO_USERNAME", "admin")
+        monkeypatch.setenv("ODOO_API_KEY", "super_secret_odoo_key_999")
+        monkeypatch.delenv("ODOO_DRY_RUN", raising=False)
+
+        with patch("odoo_safe_mcp.server._execute_local_odoo", new_callable=AsyncMock) as mock_exec:
+            mock_exec.side_effect = RuntimeError("Failed with token super_secret_odoo_key_999")
+            res = await odoo_execute_kw(
+                model="res.partner",
+                method="search_read",
+                args=[[]],
+            )
+            assert "super_secret_odoo_key_999" not in res
+            assert "[REDACTED_SECRET]" in res
+

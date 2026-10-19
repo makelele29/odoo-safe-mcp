@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from odoo_safe_mcp.rules import (
     RiskLevel,
     RuleEvaluationResult,
+    evaluate_odoo_call,
     evaluate_rule,
 )
 
@@ -58,7 +59,19 @@ def get_config() -> Dict[str, str]:
         "guard_key": os.getenv("ODOO_SAFE_GUARD_KEY", "").strip(),
         "guard_url": guard_url,
         "timeout": os.getenv("ODOO_TIMEOUT", "30.0"),
+        "dry_run": os.getenv("ODOO_DRY_RUN", "").strip().lower() in ("1", "true", "yes"),
     }
+
+
+def _sanitize_error_msg(msg: str, cfg: Dict[str, Any]) -> str:
+    """Scrub sensitive API keys or license tokens from exception strings before returning to LLM."""
+    sanitized = str(msg)
+    for key_name in ("api_key", "guard_key"):
+        secret = str(cfg.get(key_name) or "").strip()
+        if secret and len(secret) >= 4:
+            sanitized = sanitized.replace(secret, "[REDACTED_SECRET]")
+    return sanitized
+
 
 
 def _normalize_list(val: Any) -> List[Any]:
@@ -257,6 +270,37 @@ async def odoo_execute_kw(
     norm_kwargs = _normalize_dict(kwargs)
     has_pro = bool(cfg.get("guard_key"))
 
+    # 0. Dry-Run Simulation Mode (allows zero-risk local testing of YELLOW/RED policies)
+    if cfg.get("dry_run"):
+        raw_decision = evaluate_odoo_call(
+            model=model,
+            method=method,
+            args=norm_args,
+            kwargs=norm_kwargs,
+        )
+        if raw_decision.level in (RiskLevel.FORBIDDEN, RiskLevel.BLOCKED):
+            return raw_decision.reason
+        if raw_decision.level in (RiskLevel.YELLOW, RiskLevel.RED):
+            return json.dumps(
+                {
+                    "status": "DRY_RUN_SIMULATION",
+                    "executed_in_odoo": False,
+                    "risk_level": raw_decision.level.value,
+                    "model": model,
+                    "method": method,
+                    "sanitized_args": raw_decision.sanitized_args,
+                    "sanitized_kwargs": raw_decision.sanitized_kwargs,
+                    "audit_note": raw_decision.audit_note,
+                    "policy_decision": raw_decision.reason,
+                    "message": (
+                        "Dry-Run active (ODOO_DRY_RUN=true): No changes were written to Odoo. "
+                        "Disable ODOO_DRY_RUN and configure ODOO_SAFE_GUARD_KEY to execute in production."
+                    ),
+                },
+                indent=2,
+                default=str,
+            )
+
     # 1. Evaluate safety rules & traffic light status
     eval_res = evaluate_rule(
         model=model,
@@ -287,7 +331,7 @@ async def odoo_execute_kw(
             )
             return json.dumps(result, indent=2, default=str)
         except Exception as exc:
-            return f"❌ Error querying Odoo: {str(exc)}"
+            return f"❌ Error querying Odoo: {_sanitize_error_msg(str(exc), cfg)}"
 
     # 4. Guarded Draft (YELLOW) or Critical / Destructive (RED)
     if eval_res.requires_guard_proxy:
@@ -307,7 +351,7 @@ async def odoo_execute_kw(
                 return json.dumps(guard_result, indent=2, default=str)
             return str(guard_result)
         except Exception as exc:
-            return f"❌ Guard Proxy Communication Error: {str(exc)}"
+            return f"❌ Guard Proxy Communication Error: {_sanitize_error_msg(str(exc), cfg)}"
 
     return "⚠️ Unexpected evaluation state."
 
@@ -329,6 +373,7 @@ def main():
             print("  ODOO_DB               Odoo database name")
             print("  ODOO_USERNAME         Odoo user email or login")
             print("  ODOO_API_KEY          Odoo user API key or password")
+            print("  ODOO_DRY_RUN          Set to 'true' to simulate YELLOW/RED mutations without touching Odoo")
             print("  ODOO_SAFE_GUARD_KEY   Optional Pro license key for write access")
             print("  ODOO_GUARD_URL        Optional Cloudflare Worker Proxy URL")
             print("\nRun directly with Claude Desktop, Cursor, n8n, or MCP Inspector.")
@@ -338,3 +383,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
