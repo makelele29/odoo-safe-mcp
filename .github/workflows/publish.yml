@@ -7,6 +7,7 @@ on:
     branches: ["main"]
   release:
     types: [published]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -27,12 +28,12 @@ jobs:
           pip install -e .
           pip install pytest pytest-asyncio
       - name: Execute Odoo Firewall Test Suite
-        run: pytest -v
+        run: python -m pytest -v
 
   publish:
     name: Publish Package to PyPI
     needs: test
-    if: github.event_name == 'release' && github.event.action == 'published'
+    if: (github.event_name == 'release' && github.event.action == 'published') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       id-token: write # Requerido para PyPI Trusted Publishing (sin tokens manuales)

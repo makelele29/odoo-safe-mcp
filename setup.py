@@ -15,7 +15,7 @@ setup(
     long_description_content_type="text/markdown",
     url="https://odoosafemcp.stream",
     project_urls={
-        "Bug Tracker": "https://github.com/tu-usuario/odoo-safe-mcp/issues",
+        "Bug Tracker": "https://github.com/makelele29/odoo-safe-mcp/issues",
         "Documentation": "https://odoosafemcp.stream/#how",
         "Get Pro API Key": "https://odoosafemcp.stream/#pricing",
     },

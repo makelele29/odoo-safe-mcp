@@ -46,8 +46,8 @@ dependencies = [
 [project.urls]
 Homepage = "https://odoosafemcp.stream"
 Documentation = "https://odoosafemcp.stream/#how"
-Repository = "https://github.com/tu-usuario/odoo-safe-mcp"
-"Bug Tracker" = "https://github.com/tu-usuario/odoo-safe-mcp/issues"
+Repository = "https://github.com/makelele29/odoo-safe-mcp"
+"Bug Tracker" = "https://github.com/makelele29/odoo-safe-mcp/issues"
 "Get Pro API Key" = "https://odoosafemcp.stream/#pricing"
 
 [project.scripts]
