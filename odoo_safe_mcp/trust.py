@@ -23,7 +23,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 # kid -> raw Ed25519 public key (base64). Production keys are pinned at release time with
 # `node scripts/generate-signing-key.mjs <kid>` in odoo-safe-guard-enterprise.
-TRUSTED_GUARD_KEYS: Dict[str, str] = {}
+TRUSTED_GUARD_KEYS: Dict[str, str] = {
+    "k1": "QQb462ZuORATanp0uyA8Q2Mj0BUqVLGLgoc82c9i9+o=",  # production Guard, generated 2026-10-20
+}
 
 
 class DecisionError(Exception):

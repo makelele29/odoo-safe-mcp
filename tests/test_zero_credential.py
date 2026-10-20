@@ -139,8 +139,18 @@ async def test_tampered_local_operation_is_refused(world):
 async def test_no_trusted_key_fails_closed(world, monkeypatch):
     odoo, _ = world
     monkeypatch.delenv("ODOO_GUARD_PUBLIC_KEYS")
+    monkeypatch.setattr("odoo_safe_mcp.trust.TRUSTED_GUARD_KEYS", {})
     text = await call_text(odoo_execute_kw("crm.lead", "create", [{"name": "x"}]))
     assert "No trusted Guard signing key" in text and not odoo.executed("create")
+
+
+@pytest.mark.asyncio
+async def test_decision_from_key_not_pinned_is_refused(world, monkeypatch):
+    """Only the production key is pinned: a Guard signing with any other kid is not trusted."""
+    odoo, _ = world
+    monkeypatch.delenv("ODOO_GUARD_PUBLIC_KEYS")
+    text = await call_text(odoo_execute_kw("crm.lead", "create", [{"name": "x"}]))
+    assert "unknown key id 'test'" in text and not odoo.executed("create")
 
 
 @pytest.mark.parametrize("bad_id", ["../../etc/passwd", "not-a-uuid", "", "12345678-1234-1234-1234-1234567890ab/../x"])
