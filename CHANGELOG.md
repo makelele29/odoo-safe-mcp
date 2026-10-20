@@ -1,6 +1,6 @@
 # Changelog
 
-## 3.0.0 — unreleased
+## 3.0.0 — 2026-10-20
 
 ### Security
 - **Zero-credential approvals (Guard API v2).** The Odoo URL, user and API key never leave the machine.
