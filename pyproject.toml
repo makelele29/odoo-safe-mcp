@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "odoo-safe-mcp"
-version = "2.0.0"
-description = "Deterministic AI Firewall and Model Context Protocol (MCP) Server for Odoo ERP with Human-in-the-Loop approvals."
+dynamic = ["version"]
+description = "AI firewall and MCP server for Odoo 14-20: safe reads, guarded drafts and signed human approvals without sending your Odoo credentials to the cloud."
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
@@ -24,7 +24,7 @@ keywords = [
     "human-in-the-loop"
 ]
 classifiers = [
-    "Development Status :: 5 - Production/Stable",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",
@@ -32,12 +32,15 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Office/Business :: Financial :: Accounting",
     "Topic :: Security",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
-    "mcp>=1.2.0",
+    "mcp>=1.10.0",
+    "cryptography>=42.0",
     "httpx>=0.27.0",
     "pydantic>=2.6.0",
     "python-dotenv>=1.0.0",
@@ -51,7 +54,10 @@ Repository = "https://github.com/makelele29/odoo-safe-mcp"
 "Get Pro API Key" = "https://odoosafemcp.stream/#pricing"
 
 [project.scripts]
-odoo-safe-mcp = "odoo_safe_mcp.server:main"
+odoo-safe-mcp = "odoo_safe_mcp.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "odoo_safe_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 exclude = ["tests*"]
@@ -59,3 +65,7 @@ exclude = ["tests*"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "odoo: live integration tests against a real Odoo started by odoo-test-environments/testbed",
+    "e2e: full zero-credential flow against a real Odoo and a local Guard Worker (wrangler dev)",
+]

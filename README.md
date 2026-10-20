@@ -1,95 +1,137 @@
-# 🛡️ Odoo Safe MCP — The AI Firewall for Odoo ERP
+# 🛡️ Odoo Safe MCP — let AI work in Odoo, with a human in control
 
-Connect AI Agents (Claude Desktop, Cursor, n8n, LangChain) to **Odoo ERP (v14 to v19+)** without risking accounting disasters, accidental record deletions (`unlink`), or unauthorized invoice validations (`action_post`).
+Connect Claude, Cursor, n8n or your own agents to **Odoo 14 → 20** through a deterministic firewall:
+reads run instantly, drafts are guarded, and anything critical (`write`, `unlink`, confirming orders,
+posting invoices…) **waits for a person on your team to approve it from their phone — seeing exactly what
+will change.** Your Odoo credentials never leave your machine.
 
-[![PyPI version](https://img.shields.io/badge/pypi-v2.0.0-blue.svg)](https://pypi.org/project/odoo-safe-mcp/)
-[![Odoo Compatibility](https://img.shields.io/badge/Odoo-14.0%20to%2019.0-875A7B.svg)](https://www.odoo.com)
+[![PyPI](https://img.shields.io/pypi/v/odoo-safe-mcp.svg)](https://pypi.org/project/odoo-safe-mcp/)
+[![Odoo](https://img.shields.io/badge/Odoo-14%20→%2020-875A7B.svg)](#compatibility)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
 
 ---
 
-## ⚠️ Why you should NEVER connect a raw MCP server to Odoo
+## Why
 
-Odoo's native permissions were designed for humans, not LLMs. If you give an AI agent an API key for a standard sales or accounting user so it can read data or draft quotes, **that same key can execute `unlink` (delete records) or `action_post` (legally post invoices to tax authorities)**.
+Odoo 20 ships its own MCP server, and there are several community ones. They connect AI to your ERP;
+none of them answers **"who approves what the AI does?"**. An API key that can read quotes can also
+`unlink` customers or `action_post` invoices to the tax authority. One hallucination or one
+prompt-injected email is enough.
 
-One LLM hallucination can corrupt your `account.move` ledger or wipe out `res.partner` records. **Odoo Safe MCP** acts as a deterministic firewall between your AI agent and Odoo's JSON-RPC/XML-RPC API.
+Odoo Safe MCP is the control layer:
 
----
+| | |
+| :-- | :-- |
+| 🟢 **Reads** | `search_read`, `read`, `read_group`, `fields_get`… run locally and instantly. Secrets (API keys, portal `access_token`, integration passwords) are redacted even if the agent does not ask for specific fields. |
+| 🟡 **Guarded drafts** | `create` on `sale.order`, `purchase.order`, `crm.lead` is forced to draft, stripped of tracking-silencing context and of x2many commands that could touch other records, and stamped in the Chatter. |
+| 🔴 **Critical** | Everything else waits for a human on Slack or Teams, who sees the real records, *before → after* values and amounts — not just the agent's own explanation. |
+| ⛔ **Never** | Users, groups, access rules, API keys, system parameters, settings, modules, server actions… blocked even with a paid licence. |
 
-## 🚦 How the Security Traffic Light Works
+## How approvals work (zero-credential)
 
-| Risk Level | Odoo Methods | Action Taken | Tier |
-| :--- | :--- | :--- | :--- |
-| **🟢 GREEN (Safe Read)** | `search`, `read`, `search_read`, `fields_get`, `read_group`, `name_search`, `name_get`, `search_count`, `default_get` | Instant execution via local JSON-RPC. | **Free (Open Source)** |
-| **🟡 YELLOW (Guarded Drafts)** | `create` on `crm.lead`, `sale.order`, `purchase.order` | Enforces `state='draft'` and injects an AI audit note into the Odoo Chatter (`message_post`). | **Pro Guard** |
-| **🔴 RED (Critical / Destructive)** | `unlink` (any model), `action_post`, `action_confirm`, `button_validate`, `write` on `account.move` | **Pauses execution.** Sends an interactive **Approve / Reject** button to Slack or MS Teams. | **Pro Guard** |
-| **⛔ BLACKLIST (Zero-Day Protection)** | Mutations on `res.users`, `res.groups`, `ir.rule`, `ir.model.access` | **Blocked unconditionally** (even with Pro). Prevents privilege escalation. | **Hard Block** |
-
----
-
-## 🚀 Quickstart (2 Minutes)
-
-### 1. Install via `pip` or run directly with `uvx`
-
-```bash
-pip install "odoo-safe-mcp==2.0.0"
+```text
+AI agent ──MCP──► odoo-safe-mcp (your machine, holds the Odoo API key)
+                    │ 1. builds a preview from Odoo: records, before → after, amount
+                    │ 2. sends the Guard ONLY: operation JSON + SHA-256 + preview  (no URL, no user, no key)
+                    ▼
+                 Guard cloud ──card──► approver on Slack / Teams / web
+                    │ 3. signs the decision (Ed25519) bound to that exact SHA-256, database and licence
+                    ▼
+                 odoo-safe-mcp verifies the signature with a pinned public key, checks the hash
+                 matches the operation it proposed, executes ONCE with your credentials, reports the audit.
 ```
 
-### 2. Add to your Claude Desktop or Cursor configuration
+A compromised cloud cannot make your machine run anything it did not propose itself. No tunnels: it
+works the same with Odoo Online, Odoo.sh and on-premise.
 
-Edit your `claude_desktop_config.json` (or `.cursor/mcp.json`):
+## Quickstart (3 minutes)
+
+1. In Odoo, create a user for the AI (e.g. `ai-bot`, **with an email**) with only the business rights it
+   needs, and generate an API key for it (*Preferences → Account Security*).
+2. Run the guided setup — it checks the connection and permissions and writes the Claude Desktop / Cursor config:
+
+   ```bash
+   uvx odoo-safe-mcp init
+   ```
+
+3. Restart your AI client and ask *"How many open quotations do we have?"*
+
+Manual configuration (`claude_desktop_config.json` or `.cursor/mcp.json`):
 
 ```json
 {
   "mcpServers": {
-    "odoo-erp": {
+    "odoo": {
       "command": "uvx",
-      "args": ["odoo-safe-mcp@2.0.0"],
+      "args": ["odoo-safe-mcp@3.0.0"],
       "env": {
         "ODOO_URL": "https://your-company.odoo.com",
-        "ODOO_DB": "your-database-name",
+        "ODOO_DB": "your-database",
         "ODOO_USERNAME": "ai-bot@your-company.com",
-        "ODOO_API_KEY": "your_odoo_user_api_key",
-        "ODOO_DRY_RUN": "false",
-        "ODOO_SAFE_GUARD_KEY": "optional_pro_license_key_for_write_access"
+        "ODOO_API_KEY": "the_bot_api_key",
+        "ODOO_SAFE_GUARD_KEY": "optional_pro_licence"
       }
     }
   }
 }
 ```
 
-> ⚠️ **Production Best Practice (Version Pinning):** Always pin the exact version in `uvx` (`odoo-safe-mcp@2.0.0`). Running unpinned `uvx odoo-safe-mcp` downloads upstream changes on every launch, which could lead to breaking changes or unexpected behavior in automated production pipelines.
->
-> **Note:** Without `ODOO_SAFE_GUARD_KEY`, the server runs in **Strict Read-Only Mode (🟢 Green Level)**. Set `"ODOO_DRY_RUN": "true"` to test and simulate `YELLOW` and `RED` policies locally with zero risk to your database.
+Diagnose anything with `uvx odoo-safe-mcp doctor`. On Windows use `http://127.0.0.1:<port>` rather than
+`localhost` for local instances (about 20× faster).
 
----
+## Tools exposed to the agent
 
-## 🔓 Unlock Guarded Write Access, AI Defender & Slack Approvals (Pro & Partner Tiers)
+| Tool | What it does |
+| :-- | :-- |
+| `odoo_search`, `odoo_read`, `odoo_count` | Read records (paginated, long texts trimmed to save tokens) |
+| `odoo_aggregate` | Totals and counts grouped by fields (`read_group`) |
+| `odoo_describe_model`, `odoo_list_models` | Discover models and fields before writing |
+| `odoo_execute_kw` | Any ORM method through the firewall, with an optional `justification` for the approver |
+| `odoo_approval_status` | Check a pending approval and execute it once approved |
 
-Need your agents to create draft quotes, prepare vendor bills, audit payloads with **Llama 3 8B AI Defender**, or request atomic human approval on Slack before posting invoices?
+Read tools carry `readOnlyHint`; write tools `destructiveHint`. Blocks are returned as MCP errors so
+agents understand they failed.
 
-| Plan | Price | Databases | Key Features |
-| :--- | :--- | :--- | :--- |
-| **Community** | **€0 / forever** | 1 Local DB | Strict Read-Only Mode (🟢 Green), Zero-Risk Dry-Run Simulation (`ODOO_DRY_RUN=true`), Credential Sanitization |
-| **Pro Guard** | **€49 / month** | Up to 5 DBs | Guarded Drafts (🟡 Yellow), Slack Interactive Approvals (🔴 Red), D1 Audit Log, **Llama 3 8B AI Defender Included** |
-| **Partner Agency** | **€149 / month** | Up to 25 DBs | Multi-tenant Agency Isolation, Custom Slack Signing Secret, MS Teams Alerts, Llama 3 AI Defender |
+## Plans
 
-1. Get your **License Key** at **[odoosafemcp.stream/#pricing](https://odoosafemcp.stream/#pricing)**.
-2. Connect your Slack webhook in 1 click via the Cloudflare D1 Activation Portal.
-3. Add `ODOO_SAFE_GUARD_KEY` to your environment variables.
+| Plan | Price | What you get |
+| :-- | :-- | :-- |
+| **Community** | Free (MIT) | Firewalled reads, secret redaction, dry-run simulation (`ODOO_DRY_RUN=true`) |
+| **Pro Guard** | €49 / month | Up to 5 databases, guarded drafts, human approvals on Slack/Teams/web with previews, audit log, kill-switch, AI Defender |
+| **Business** | €149 / month | Up to 10 databases, Microsoft Teams, your own Slack app (in-Slack buttons). Need more? Contact us |
 
----
+Get a licence at **[odoosafemcp.stream](https://odoosafemcp.stream/#pricing)**.
 
-## 📄 License & Terms of Service
+## Security & testing
 
-Distributed under the **MIT License** — Free forever for read-only local execution and Dry-Run simulation.
+- Every rule is covered by an exhaustive policy matrix (~1,750 model × method × licence combinations)
+  and a regression test for each vulnerability found during our own red-teaming.
+- A real testbed starts Odoo 14 → 20 in Docker with a least-privilege bot and runs the integration
+  suite; an end-to-end suite runs the real Guard Worker locally and proves, among other things, that the
+  Guard database never contains Odoo credentials and that signed approval links cannot be forged,
+  reused or swapped.
+- Report vulnerabilities privately to **soporte@odoosafemcp.stream**.
 
-### Limitation of Liability, GDPR Privacy & Trademark Disclaimer
-> **IMPORTANT NOTICE:** `odoo-safe-mcp` and its associated Enterprise Guard backend are provided on an **"AS IS" and "AS AVAILABLE"** basis without warranties of any kind, either express or implied, including but not limited to implied warranties of merchantability, fitness for a particular purpose, and non-infringement.
->
-> 1. **Auxiliary Control Layer & Human-in-the-Loop Responsibility:** This software operates strictly as an auxiliary deterministic filter and does not replace native database security, accounting audits, or operational vigilance. The human supervisor who clicks **"Approve"** in Slack or Microsoft Teams is the sole legal and accounting authorizer of the resulting ERP mutation.
-> 2. **Customer Responsibilities:** The user and customer retain sole and exclusive responsibility for configuring least-privilege permissions on the Odoo user account linked to `ODOO_API_KEY`, monitoring AI agent behavior, and maintaining independent, verified daily database backups.
-> 3. **Liability Cap:** To the maximum extent permitted by applicable law, the cumulative aggregate liability of the authors, contributors, and operators for any direct, indirect, incidental, special, or consequential damages (including data loss, accounting discrepancy, lost revenue, or business interruption) shall be strictly capped at the total fee actually paid by the customer for the software during the **one (1) month immediately preceding the event** giving rise to liability (maximum €49 for Pro Guard, €149 for Partner Agency, or €0 for Community Tier).
-> 4. **GDPR / RGPD Zero-Data-Retention Architecture:** Read-only (`GREEN`) queries execute locally on the user's machine and never transit through the Enterprise Guard cloud. Paused (`RED`) payloads are encrypted in transit and at rest using `AES-GCM-256` and are **purged immediately (`PURGED_AFTER_RESOLUTION`)** upon approval, rejection, or 24-hour TTL expiration. Audit logs store only cryptographic `SHA-256` payload hashes and technical metadata.
-> 5. **Trademark & Non-Affiliation Disclaimer:** This project is an independent software product and is **not affiliated with, sponsored by, or endorsed by Odoo S.A.** `Odoo` is a registered trademark of Odoo S.A. `Slack` is a registered trademark of Slack Technologies, LLC. `Microsoft Teams` is a registered trademark of Microsoft Corporation.
+## Compatibility
 
+Built for Odoo 14 → 20 (Community & Enterprise, Online / Odoo.sh / on-premise), Python 3.10 → 3.14 and
+any MCP client (Claude Desktop, Cursor, Windsurf, VS Code, n8n, custom agents). `name_get` is emulated on
+Odoo 17+, and Chatter notes use `body_is_html` where required.
+
+| Odoo | 14 | 15 | 16 | 17 | 18 | 19 | 20 |
+| :-- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| Live integration suite (real Odoo in Docker) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| End-to-end approvals with the real Guard | ✅ | — | — | — | ✅ | — | ✅ |
+
+*Last full run: 20 Oct 2026, 0 failures. Odoo 20 needs an API key with the RPC scope; aggregations are
+translated to its new `read_group` API automatically.*
+
+## License & disclaimer
+
+MIT. Provided **"as is"**, without warranties. Odoo Safe MCP is an auxiliary control layer: it does not
+replace Odoo's access rights, backups or accounting review, and the person who approves an operation is
+its authoriser. Liability is capped at the fees paid in the month preceding the event. Read-only
+operations never transit our cloud; approval previews are encrypted at rest and purged on resolution.
+
+*Not affiliated with, sponsored or endorsed by Odoo S.A. "Odoo" is a trademark of Odoo S.A.; "Slack" of
+Slack Technologies, LLC; "Microsoft Teams" of Microsoft Corporation.*
