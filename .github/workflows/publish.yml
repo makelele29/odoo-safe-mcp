@@ -9,6 +9,9 @@ on:
     types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Run Security Firewall Tests
@@ -33,20 +36,24 @@ jobs:
   publish:
     name: Publish Package to PyPI
     needs: test
-    if: (github.event_name == 'release' && github.event.action == 'published') || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'release' && github.event.action == 'published') || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-latest
     permissions:
       id-token: write # Requerido para PyPI Trusted Publishing (sin tokens manuales)
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Refuse to publish without a pinned Guard signing key
+      - name: Verify release tag matches package version and pinned Guard key
         run: |
           python -m pip install -e .
           python -c "from odoo_safe_mcp.trust import TRUSTED_GUARD_KEYS as k; assert k, 'Pin the production Guard key in odoo_safe_mcp/trust.py before publishing'"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            python -c "import os, odoo_safe_mcp; assert f'v{odoo_safe_mcp.__version__}' == os.environ['GITHUB_REF_NAME'], (odoo_safe_mcp.__version__, os.environ['GITHUB_REF_NAME'])"
+          fi
       - name: Build distribution packages
         run: |
           python -m pip install --upgrade pip build

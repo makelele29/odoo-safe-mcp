@@ -1,5 +1,18 @@
 # Changelog
 
+## 3.1.0 — 2026-11-25
+
+### Security & Privacy
+- **GDPR PII Shield (`ODOO_PII_MODE=off|mask|strict`):** Masks or redacts `vat`, `email`, `phone`, `acc_number`/`iban`, `wage`, and street addresses across reads and execution summaries before data enters the LLM context.
+- **Strict Multi-Company Isolation (`ODOO_ALLOWED_COMPANY_IDS`):** Enforces and clamps `allowed_company_ids` in the ORM `context` of every local RPC call.
+- **SEC-07 Domain Oracle Protection:** Blocks boolean-oracle reads filtering, grouping, or ordering by credential/token fields (including dotted relations like `user_ids.oauth_access_token` and `signup` fields), and strips sensitive fields passed positionally.
+
+### Governance & Product
+- **Telegram Bot Approvals & Draft Thresholds:** Added `ODOO_DRAFT_MAX_AMOUNT` local escalation support and preview `amount_total` estimation from inline `sale.order` / `purchase.order` lines `(0, 0, {...})`.
+- **Context Efficiency:** Added curated lightweight `DEFAULT_FIELD_PROFILES` on `odoo_search` (overridable via `all_fields=True`), `bin_size` context on full reads, a 60 KB output ceiling (`_truncated` envelope), and fuzzy/writable filtering in `odoo_describe_model(search=..., include_readonly=...)`.
+- **Session-Independent Approvals:** Added `odoo_pending_approvals` read-only tool backed by `PendingStore.list_pending()` so approvals can be resumed in any new conversation.
+- **Windows Onboarding & MCP Registry:** `init` automatically falls back from `uvx` to `odoo-safe-mcp` or `python -m odoo_safe_mcp.cli`, added `__main__.py`, `server.json`, and `Production/Stable` PyPI classifier.
+
 ## 3.0.0 — 2026-10-20
 
 ### Security

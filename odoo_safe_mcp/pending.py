@@ -13,7 +13,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 _INTENT_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -70,3 +70,31 @@ class PendingStore:
             return json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
             return {"status": "EXECUTED"}
+
+    def list_pending(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """List locally proposed intents awaiting execution on this machine (newest first)."""
+        if not self.dir.exists():
+            return []
+        items: List[Dict[str, Any]] = []
+        for path in self.dir.glob("*.json"):
+            intent_id = path.stem
+            if not valid_intent_id(intent_id):
+                continue
+            if self._path(intent_id, ".done").exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            items.append(
+                {
+                    "intent_id": intent_id,
+                    "model": data.get("model"),
+                    "method": data.get("method"),
+                    "db": data.get("db"),
+                    "risk": data.get("risk"),
+                    "created_at": data.get("created_at"),
+                }
+            )
+        items.sort(key=lambda item: float(item.get("created_at") or 0), reverse=True)
+        return items[: max(1, limit)]

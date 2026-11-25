@@ -6,6 +6,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional, Tuple
 from urllib.parse import urlparse
 
 DEFAULT_GUARD_URL = "https://odoosafemcp.stream"
@@ -20,6 +21,37 @@ def _guard_base_url(raw: str) -> str:
     return url
 
 
+def _parse_pii_mode(raw: str) -> str:
+    mode = (raw or "").strip().lower()
+    return mode if mode in ("off", "mask", "strict") else "off"
+
+
+def _parse_company_ids(raw: str) -> Tuple[int, ...]:
+    ids = []
+    for part in (raw or "").split(","):
+        token = part.strip()
+        if not token:
+            continue
+        try:
+            cid = int(token)
+        except ValueError:
+            continue
+        if cid > 0 and cid not in ids:
+            ids.append(cid)
+    return tuple(ids)
+
+
+def _parse_positive_float(raw: str) -> Optional[float]:
+    token = (raw or "").strip()
+    if not token:
+        return None
+    try:
+        val = float(token)
+        return val if val > 0 else None
+    except ValueError:
+        return None
+
+
 @dataclass(frozen=True)
 class Config:
     url: str
@@ -32,6 +64,9 @@ class Config:
     dry_run: bool
     approval_wait: float
     state_dir: Path
+    pii_mode: str = "off"
+    allowed_company_ids: Tuple[int, ...] = ()
+    draft_max_amount: Optional[float] = None
 
     @property
     def has_credentials(self) -> bool:
@@ -81,6 +116,9 @@ def get_config() -> Config:
         dry_run=os.getenv("ODOO_DRY_RUN", "").strip().lower() in ("1", "true", "yes"),
         approval_wait=max(0.0, min(approval_wait, 120.0)),
         state_dir=state_dir,
+        pii_mode=_parse_pii_mode(os.getenv("ODOO_PII_MODE", "")),
+        allowed_company_ids=_parse_company_ids(os.getenv("ODOO_ALLOWED_COMPANY_IDS", "")),
+        draft_max_amount=_parse_positive_float(os.getenv("ODOO_DRAFT_MAX_AMOUNT", "")),
     )
 
 

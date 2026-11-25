@@ -1,5 +1,7 @@
 # 🛡️ Odoo Safe MCP — let AI work in Odoo, with a human in control
 
+<!-- mcp-name: io.github.makelele29/odoo-safe-mcp -->
+
 Connect Claude, Cursor, n8n or your own agents to **Odoo 14 → 20** through a deterministic firewall:
 reads run instantly, drafts are guarded, and anything critical (`write`, `unlink`, confirming orders,
 posting invoices…) **waits for a person on your team to approve it from their phone — seeing exactly what
@@ -22,9 +24,9 @@ Odoo Safe MCP is the control layer:
 
 | | |
 | :-- | :-- |
-| 🟢 **Reads** | `search_read`, `read`, `read_group`, `fields_get`… run locally and instantly. Secrets (API keys, portal `access_token`, integration passwords) are redacted even if the agent does not ask for specific fields. |
-| 🟡 **Guarded drafts** | `create` on `sale.order`, `purchase.order`, `crm.lead` is forced to draft, stripped of tracking-silencing context and of x2many commands that could touch other records, and stamped in the Chatter. |
-| 🔴 **Critical** | Everything else waits for a human on Slack or Teams, who sees the real records, *before → after* values and amounts — not just the agent's own explanation. |
+| 🟢 **Reads** | `search_read`, `read`, `read_group`, `fields_get`… run locally and instantly. Secrets (API keys, portal `access_token`, integration passwords) are redacted even if the agent does not ask for specific fields, and `ODOO_PII_MODE=mask\|strict` masks GDPR PII (`vat`, `email`, `phone`, IBAN, `wage`). |
+| 🟡 **Guarded drafts** | `create` on `sale.order`, `purchase.order`, `crm.lead` is forced to draft, stripped of tracking-silencing context and of x2many commands that could touch other records, and stamped in the Chatter. Optionally escalate drafts above `ODOO_DRAFT_MAX_AMOUNT` to human approval. |
+| 🔴 **Critical** | Everything else waits for a human on Slack, Microsoft Teams or Telegram, who sees the real records, *before → after* values and amounts — not just the agent's own explanation. |
 | ⛔ **Never** | Users, groups, access rules, API keys, system parameters, settings, modules, server actions… blocked even with a paid licence. |
 
 ## How approvals work (zero-credential)
@@ -42,16 +44,20 @@ AI agent ──MCP──► odoo-safe-mcp (your machine, holds the Odoo API key)
 ```
 
 A compromised cloud cannot make your machine run anything it did not propose itself. No tunnels: it
-works the same with Odoo Online, Odoo.sh and on-premise.
+works with Odoo Online (**Custom plan**, which enables external API access), Odoo.sh and on-premise.
+Want 100% in-Odoo enforcement with native mobile approvals, zero cloud dependency and one-time pricing?
+Check out our companion Odoo module **`safe_ai_guard`** on the Odoo Apps Store.
 
 ## Quickstart (3 minutes)
 
 1. In Odoo, create a user for the AI (e.g. `ai-bot`, **with an email**) with only the business rights it
    needs, and generate an API key for it (*Preferences → Account Security*).
-2. Run the guided setup — it checks the connection and permissions and writes the Claude Desktop / Cursor config:
+2. Run the guided setup — it checks the connection and permissions and writes the Claude Desktop / Cursor config (automatically falling back to `pip` / `python -m odoo_safe_mcp.cli` if `uvx` is not installed):
 
    ```bash
    uvx odoo-safe-mcp init
+   # or with pip:
+   pip install odoo-safe-mcp && odoo-safe-mcp init
    ```
 
 3. Restart your AI client and ask *"How many open quotations do we have?"*
@@ -83,11 +89,12 @@ Diagnose anything with `uvx odoo-safe-mcp doctor`. On Windows use `http://127.0.
 
 | Tool | What it does |
 | :-- | :-- |
-| `odoo_search`, `odoo_read`, `odoo_count` | Read records (paginated, long texts trimmed to save tokens) |
+| `odoo_search`, `odoo_read`, `odoo_count` | Read records (lightweight default field profiles, 60 KB cap, long texts trimmed to save tokens) |
 | `odoo_aggregate` | Totals and counts grouped by fields (`read_group`) |
-| `odoo_describe_model`, `odoo_list_models` | Discover models and fields before writing |
+| `odoo_describe_model`, `odoo_list_models` | Discover models and filter fields (`search='x_'`) before writing |
 | `odoo_execute_kw` | Any ORM method through the firewall, with an optional `justification` for the approver |
 | `odoo_approval_status` | Check a pending approval and execute it once approved |
+| `odoo_pending_approvals` | List pending approvals proposed from this machine across sessions |
 
 Read tools carry `readOnlyHint`; write tools `destructiveHint`. Blocks are returned as MCP errors so
 agents understand they failed.
@@ -97,7 +104,7 @@ agents understand they failed.
 | Plan | Price | What you get |
 | :-- | :-- | :-- |
 | **Community** | Free (MIT) | Firewalled reads, secret redaction, dry-run simulation (`ODOO_DRY_RUN=true`) |
-| **Pro Guard** | €49 / month | Up to 5 databases, guarded drafts, human approvals on Slack/Teams/web with previews, audit log, kill-switch, AI Defender |
+| **Pro Guard** | €49 / month | Up to 5 databases, guarded drafts, human approvals on Slack/Teams/Telegram/web with previews, draft thresholds, audit log, kill-switch, AI Defender |
 | **Business** | €149 / month | Up to 10 databases, Microsoft Teams, your own Slack app (in-Slack buttons). Need more? Contact us |
 
 Get a licence at **[odoosafemcp.stream](https://odoosafemcp.stream/#pricing)**.

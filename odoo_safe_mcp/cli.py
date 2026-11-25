@@ -44,6 +44,9 @@ Environment:
   ODOO_URL, ODOO_DB, ODOO_USERNAME, ODOO_API_KEY   Odoo access (use a least-privilege bot user)
   ODOO_DRY_RUN=true                                Simulate writes, never touch Odoo
   ODOO_SAFE_GUARD_KEY                              Pro Guard licence (approvals, audit, kill-switch)
+  ODOO_PII_MODE                                    GDPR PII shield on reads: off | mask | strict
+  ODOO_ALLOWED_COMPANY_IDS                         Comma-separated company IDs to enforce in context
+  ODOO_DRAFT_MAX_AMOUNT                            Max draft total before requiring human approval
   ODOO_APPROVAL_WAIT_SECONDS                       Wait inline for an approval (default 25)
   ODOO_GUARD_URL, ODOO_GUARD_PUBLIC_KEYS           Self-hosted Guard only
 """
@@ -111,6 +114,12 @@ async def run_doctor(cfg: Config) -> int:
 
         if cfg.dry_run:
             report(OK, "Dry-run active: writes are simulated, Odoo is never modified")
+        if cfg.pii_mode != "off":
+            report(OK, f"GDPR PII shield: {cfg.pii_mode}")
+        if cfg.allowed_company_ids:
+            report(OK, f"Multi-company lock: allowed_company_ids={list(cfg.allowed_company_ids)}")
+        if cfg.draft_max_amount is not None:
+            report(OK, f"Draft threshold: drafts > {cfg.draft_max_amount:.2f} escalate for approval")
         if not cfg.has_pro:
             report(OK, "Community tier: read-only (set ODOO_SAFE_GUARD_KEY for approvals and audit)")
         else:
@@ -119,7 +128,7 @@ async def run_doctor(cfg: Config) -> int:
                 lic = await guard.license()
                 report(OK, f"Pro Guard: plan {lic.get('plan')} · {len(lic.get('databases') or [])}/{lic.get('max_databases')} databases")
                 channels = [name for name, on in (lic.get("approval_channels") or {}).items() if on]
-                report(OK if channels else FAIL, f"Approval channels: {', '.join(channels) or 'none — connect Slack or Teams in the portal'}")
+                report(OK if channels else FAIL, f"Approval channels: {', '.join(channels) or 'none — connect Slack, Teams or Telegram in the portal'}")
                 if lic.get("writes_paused"):
                     report(WARN, "Kill-switch is ON: all AI writes are paused")
             except Exception as exc:
@@ -168,7 +177,14 @@ def client_config_paths() -> Dict[str, Path]:
 
 
 def server_entry(env: Dict[str, str]) -> Dict[str, Any]:
-    return {"command": "uvx", "args": [f"odoo-safe-mcp@{__version__}"], "env": {k: v for k, v in env.items() if v}}
+    clean_env = {k: v for k, v in env.items() if v}
+    uvx_bin = shutil.which("uvx")
+    if uvx_bin:
+        return {"command": uvx_bin, "args": [f"odoo-safe-mcp@{__version__}"], "env": clean_env}
+    cli_bin = shutil.which("odoo-safe-mcp")
+    if cli_bin:
+        return {"command": cli_bin, "args": [], "env": clean_env}
+    return {"command": sys.executable, "args": ["-m", "odoo_safe_mcp.cli"], "env": clean_env}
 
 
 def merge_mcp_config(existing: Dict[str, Any], name: str, entry: Dict[str, Any]) -> Dict[str, Any]:
@@ -209,6 +225,8 @@ def run_init(ask: Callable[[str], str] = input, ask_secret: Callable[[str], str]
         return 1
 
     entry = server_entry(env)
+    if entry["command"] == sys.executable:
+        _print(f"{WARN} 'uvx' was not found on PATH; configured Python executable ({sys.executable}) instead.")
     _print("")
     for client, path in client_config_paths().items():
         if ask(f"Add to {client} ({path})? [Y/n] ").strip().lower() in ("", "y", "yes", "s", "si", "sí"):

@@ -1,6 +1,7 @@
 """CLI onboarding (init/doctor), configuration parsing and the local pending store."""
 
 import json
+import sys
 
 import pytest
 
@@ -40,10 +41,20 @@ def test_guard_url_accepts_legacy_endpoint_forms(raw):
     assert _guard_base_url(raw) == "https://odoosafemcp.stream"
 
 
-def test_server_entry_pins_version_and_drops_empty_values():
+def test_server_entry_pins_version_and_drops_empty_values(monkeypatch):
+    monkeypatch.setattr("odoo_safe_mcp.cli.shutil.which", lambda cmd: "/usr/local/bin/uvx" if cmd == "uvx" else None)
     entry = server_entry({"ODOO_URL": "https://x", "ODOO_SAFE_GUARD_KEY": ""})
+    assert entry["command"] == "/usr/local/bin/uvx"
     assert entry["args"] == [f"odoo-safe-mcp@{__version__}"]
     assert entry["env"] == {"ODOO_URL": "https://x"}
+
+    monkeypatch.setattr("odoo_safe_mcp.cli.shutil.which", lambda cmd: "C:\\Scripts\\odoo-safe-mcp.exe" if cmd == "odoo-safe-mcp" else None)
+    cli_entry = server_entry({"ODOO_URL": "https://x"})
+    assert cli_entry == {"command": "C:\\Scripts\\odoo-safe-mcp.exe", "args": [], "env": {"ODOO_URL": "https://x"}}
+
+    monkeypatch.setattr("odoo_safe_mcp.cli.shutil.which", lambda _cmd: None)
+    py_entry = server_entry({"ODOO_URL": "https://x"})
+    assert py_entry == {"command": sys.executable, "args": ["-m", "odoo_safe_mcp.cli"], "env": {"ODOO_URL": "https://x"}}
 
 
 def test_merge_keeps_other_mcp_servers():

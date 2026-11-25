@@ -1,0 +1,79 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.makelele29/odoo-safe-mcp",
+  "title": "Odoo Safe MCP",
+  "description": "Deterministic AI firewall & MCP server for Odoo 14-20 with GDPR PII redaction, guarded drafts, and zero-credential Slack/Teams/Telegram approvals.",
+  "repository": {
+    "url": "https://github.com/makelele29/odoo-safe-mcp",
+    "source": "github"
+  },
+  "version": "3.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "odoo-safe-mcp",
+      "version": "3.1.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "ODOO_URL",
+          "description": "Base URL of your Odoo instance (e.g. https://company.odoo.com or http://127.0.0.1:8069).",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "ODOO_DB",
+          "description": "Odoo database name.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "ODOO_USERNAME",
+          "description": "Dedicated least-privilege AI bot login.",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "ODOO_API_KEY",
+          "description": "Odoo API key for the AI bot user (stays local, never sent to Guard Cloud).",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "ODOO_SAFE_GUARD_KEY",
+          "description": "Optional Pro/Business licence key for Slack/Teams/Telegram human approvals and audit log.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true
+        },
+        {
+          "name": "ODOO_PII_MODE",
+          "description": "Optional GDPR PII shield for reads: off, mask, or strict.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "ODOO_ALLOWED_COMPANY_IDS",
+          "description": "Optional comma-separated Odoo company IDs to lock all queries and writes.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        },
+        {
+          "name": "ODOO_DRAFT_MAX_AMOUNT",
+          "description": "Optional max total amount for auto-approved drafts before escalating to human approval.",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false
+        }
+      ]
+    }
+  ]
+}

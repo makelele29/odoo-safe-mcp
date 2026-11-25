@@ -110,11 +110,47 @@ FORBIDDEN_SENSITIVE_FIELDS = {
 # Any field whose name matches this pattern is treated as a credential, both when requested
 # and when returned by Odoo (reads without an explicit 'fields' list return every field).
 SENSITIVE_FIELD_PATTERN = re.compile(
-    r"password|passwd|secret|token|api_?key|private_?key|access_?key|server_?key|totp|credential",
+    r"password|passwd|secret|token|api_?key|private_?key|access_?key|server_?key|totp|credential|signup",
     re.IGNORECASE,
 )
 
 REDACTED_VALUE = "[REDACTED by Odoo Safe MCP]"
+PII_REDACTED_VALUE = "[REDACTED_PII]"
+PII_MASKED_VALUE = "[MASKED_PII]"
+
+# Personal / financial fields subject to configurable GDPR PII redaction (ODOO_PII_MODE=mask|strict)
+PII_FIELD_NAMES = {
+    "vat",
+    "partner_vat",
+    "email",
+    "email_normalized",
+    "email_from",
+    "private_email",
+    "work_email",
+    "phone",
+    "phone_sanitized",
+    "mobile",
+    "private_phone",
+    "work_phone",
+    "mobile_phone",
+    "acc_number",
+    "sanitized_acc_number",
+    "iban",
+    "wage",
+    "ssnid",
+    "sinid",
+    "identification_id",
+    "passport_id",
+    "birthday",
+    "street",
+    "street2",
+}
+
+PII_FIELD_PATTERN = re.compile(
+    r"^(?:.*_)?(vat|iban|acc_number|wage|salary|ssnid|sinid|passport_id|identification_id|birthday)$"
+    r"|^(?:work_|private_|partner_)?(email|email_normalized|email_from|phone|phone_sanitized|mobile|mobile_phone|street|street2)$",
+    re.IGNORECASE,
+)
 
 # Context keys a YELLOW create may carry. Anything else is dropped: keys such as
 # 'tracking_disable' or 'mail_notrack' would silence the audit trail in the Chatter.
@@ -344,6 +380,77 @@ def _is_sensitive_field(name: Any) -> bool:
     return clean in FORBIDDEN_SENSITIVE_FIELDS or bool(SENSITIVE_FIELD_PATTERN.search(clean))
 
 
+def _has_sensitive_field_path(path: Any) -> Optional[str]:
+    """Return the first sensitive dotted field segment in a field expression (e.g. 'user_ids.oauth_access_token')."""
+    if not isinstance(path, str):
+        return None
+    base = path.split(":", 1)[0].strip()
+    if not base:
+        return None
+    for part in base.split("."):
+        if _is_sensitive_field(part):
+            return base
+    return None
+
+
+def _domain_has_sensitive_path(domain: Any) -> Optional[str]:
+    """Inspect an Odoo domain tree for any leaf referencing a sensitive credential field."""
+    if not isinstance(domain, (list, tuple)):
+        return None
+    if len(domain) == 3 and isinstance(domain[0], str) and domain[0] not in ("&", "|", "!"):
+        return _has_sensitive_field_path(domain[0])
+    for item in domain:
+        if isinstance(item, (list, tuple)):
+            hit = _domain_has_sensitive_path(item)
+            if hit:
+                return hit
+    return None
+
+
+def _find_sensitive_read_oracle(method: str, args: List[Any], kwargs: Dict[str, Any]) -> Optional[str]:
+    """Block boolean-oracle attacks filtering/grouping/ordering by credential fields."""
+    if method != "read" and args:
+        hit = _domain_has_sensitive_path(args[0])
+        if hit:
+            return hit
+    if "domain" in kwargs:
+        hit = _domain_has_sensitive_path(kwargs.get("domain"))
+        if hit:
+            return hit
+    groupby = kwargs.get("groupby")
+    if isinstance(groupby, str):
+        hit = _has_sensitive_field_path(groupby)
+        if hit:
+            return hit
+    elif isinstance(groupby, (list, tuple)):
+        for item in groupby:
+            hit = _has_sensitive_field_path(item)
+            if hit:
+                return hit
+    for order_key in ("order", "orderby"):
+        order_val = kwargs.get(order_key)
+        if isinstance(order_val, str):
+            for clause in order_val.split(","):
+                col = clause.strip().split()[0] if clause.strip() else ""
+                hit = _has_sensitive_field_path(col)
+                if hit:
+                    return hit
+    return None
+
+
+def _sanitize_green_read_args(method: str, args: List[Any]) -> List[Any]:
+    """Strip sensitive credential fields when passed positionally (e.g. read(ids, fields) or default_get(fields))."""
+    if method in ("read", "search_read") and len(args) > 1 and isinstance(args[1], list):
+        new_args = copy.deepcopy(args)
+        new_args[1] = [f for f in args[1] if isinstance(f, str) and not _has_sensitive_field_path(f)]
+        return new_args
+    if method == "default_get" and args and isinstance(args[0], list):
+        new_args = copy.deepcopy(args)
+        new_args[0] = [f for f in args[0] if isinstance(f, str) and not _has_sensitive_field_path(f)]
+        return new_args
+    return args
+
+
 def _sanitize_green_read_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     """Strip any forbidden credential fields from 'fields' parameter in read/search_read."""
     new_kwargs = copy.deepcopy(kwargs)
@@ -351,7 +458,7 @@ def _sanitize_green_read_kwargs(kwargs: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(fields_param, list):
         new_kwargs["fields"] = [
             f for f in fields_param
-            if isinstance(f, str) and not _is_sensitive_field(f.split(":")[0])
+            if isinstance(f, str) and not _is_sensitive_field(f.split(":")[0]) and not _has_sensitive_field_path(f)
         ]
     return new_kwargs
 
@@ -366,8 +473,61 @@ def redact_sensitive_output(result: Any) -> Any:
     if isinstance(result, list):
         return [redact_sensitive_output(item) for item in result]
     if isinstance(result, dict):
+        out: Dict[str, Any] = {}
+        for key, value in result.items():
+            key_str = str(key)
+            if _is_sensitive_field(key_str.split(":")[0]):
+                out[key] = REDACTED_VALUE
+            elif key_str == "__domain" and _domain_has_sensitive_path(value):
+                out[key] = REDACTED_VALUE
+            else:
+                out[key] = redact_sensitive_output(value)
+        return out
+    return result
+
+
+def _is_pii_field(name: Any) -> bool:
+    if not isinstance(name, str):
+        return False
+    clean = name.split(":", 1)[0].strip().lower()
+    return clean in PII_FIELD_NAMES or bool(PII_FIELD_PATTERN.match(clean))
+
+
+def _mask_pii_value(value: Any, mode: str) -> Any:
+    if value is None or value is False or value == "":
+        return value
+    if mode == "strict":
+        return PII_REDACTED_VALUE
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip()
+        if not s:
+            return value
+        if "@" in s:
+            local, domain = s.split("@", 1)
+            prefix = local[0] if local else "*"
+            return f"{prefix}***@{domain}"
+        if len(s) >= 6:
+            return f"{s[:2]}{'*' * min(8, len(s) - 4)}{s[-2:]}"
+        return PII_MASKED_VALUE
+    return PII_MASKED_VALUE
+
+
+def redact_pii_output(result: Any, mode: str = "off") -> Any:
+    """Mask or redact GDPR PII fields (VAT, IBAN, email, phone, wage, street) before returning to an LLM."""
+    norm_mode = (mode or "off").strip().lower()
+    if norm_mode not in ("mask", "strict"):
+        return result
+    if isinstance(result, list):
+        return [redact_pii_output(item, norm_mode) for item in result]
+    if isinstance(result, dict):
         return {
-            key: REDACTED_VALUE if _is_sensitive_field(str(key).split(":")[0]) else redact_sensitive_output(value)
+            key: (
+                _mask_pii_value(value, norm_mode)
+                if _is_pii_field(str(key))
+                else redact_pii_output(value, norm_mode)
+            )
             for key, value in result.items()
         }
     return result
@@ -499,13 +659,28 @@ def evaluate_odoo_call(
 
     # 4. GREEN TIER: Safe Read Operations on standard business models
     if norm_method in GREEN_METHODS:
+        oracle_hit = _find_sensitive_read_oracle(norm_method, args, kwargs)
+        if oracle_hit:
+            return RuleEvaluationResult(
+                level=RiskLevel.FORBIDDEN,
+                allowed=False,
+                requires_guard_proxy=False,
+                reason=(
+                    f"⛔ SECURITY ALERT: Querying or filtering on sensitive credential field '{oracle_hit}' "
+                    "is permanently FORBIDDEN."
+                ),
+                sanitized_args=args,
+                sanitized_kwargs=kwargs,
+                inject_chatter_note=False,
+            )
+        san_args = _sanitize_green_read_args(norm_method, args)
         san_kwargs = _sanitize_green_read_kwargs(kwargs)
         return RuleEvaluationResult(
             level=RiskLevel.GREEN,
             allowed=True,
             requires_guard_proxy=False,
             reason="Safe read-only operation. Executed instantly via local JSON-RPC.",
-            sanitized_args=args,
+            sanitized_args=san_args,
             sanitized_kwargs=san_kwargs,
             inject_chatter_note=False,
         )

@@ -27,14 +27,16 @@ from odoo_safe_mcp.rules import (
     _is_sensitive_field,
     evaluate_odoo_call,
     evaluate_rule,
+    redact_pii_output,
     redact_sensitive_output,
 )
 from odoo_safe_mcp.trust import DecisionError, sha256_hex, verify_decision
 
 INSTRUCTIONS = (
     "Secure gateway to Odoo ERP. Prefer odoo_search / odoo_read / odoo_count / odoo_aggregate for questions and "
-    "odoo_describe_model before writing. Writes go through odoo_execute_kw: drafts may run immediately, critical "
-    "operations wait for a human approval (check them later with odoo_approval_status). Always pass a short, honest "
+    "odoo_describe_model(model, search=...) before writing (especially to find x_* Studio fields). Writes go through "
+    "odoo_execute_kw: drafts may run immediately, critical operations wait for human approval (check pending items "
+    "anytime with odoo_pending_approvals and execute them with odoo_approval_status). Always pass a short, honest "
     "'justification' for writes: the approver sees it next to the real change."
 )
 
@@ -75,7 +77,22 @@ MISSING_CREDENTIALS = (
     "Please configure ODOO_URL, ODOO_DB, ODOO_USERNAME, and ODOO_API_KEY."
 )
 MAX_TEXT = 1000
+MAX_OUTPUT_BYTES = 60_000
 _SCHEMA_CACHE: Dict[tuple, Dict[str, Any]] = {}
+
+# Curated lightweight projections (8-12 key fields) to avoid token bloat on 150+ field models
+DEFAULT_FIELD_PROFILES: Dict[str, List[str]] = {
+    "res.partner": ["id", "name", "display_name", "is_company", "email", "phone", "vat", "city", "country_id", "customer_rank", "supplier_rank"],
+    "sale.order": ["id", "name", "partner_id", "date_order", "state", "amount_untaxed", "amount_total", "currency_id", "invoice_status", "user_id"],
+    "purchase.order": ["id", "name", "partner_id", "date_order", "state", "amount_untaxed", "amount_total", "currency_id", "invoice_status", "user_id"],
+    "account.move": ["id", "name", "move_type", "partner_id", "invoice_date", "invoice_date_due", "state", "payment_state", "amount_total", "amount_residual", "currency_id"],
+    "product.product": ["id", "name", "default_code", "barcode", "type", "list_price", "standard_price", "qty_available", "categ_id", "active"],
+    "product.template": ["id", "name", "default_code", "type", "list_price", "standard_price", "qty_available", "categ_id", "sale_ok", "purchase_ok", "active"],
+    "crm.lead": ["id", "name", "type", "partner_id", "email_from", "phone", "stage_id", "expected_revenue", "probability", "user_id"],
+    "stock.picking": ["id", "name", "picking_type_id", "partner_id", "origin", "scheduled_date", "date_done", "state", "location_id", "location_dest_id"],
+    "project.task": ["id", "name", "project_id", "stage_id", "user_ids", "date_deadline", "priority", "state"],
+    "hr.employee": ["id", "name", "job_title", "department_id", "work_email", "work_phone", "parent_id", "company_id", "active"],
+}
 
 
 # --- Normalisation of LLM arguments --------------------------------------------------------------
@@ -118,6 +135,47 @@ def _normalize_dict(val: Any) -> Dict[str, Any]:
 
 def _dumps(data: Any) -> str:
     return json.dumps(data, indent=2, default=str, ensure_ascii=False)
+
+
+def _dumps_bounded(data: Any, max_bytes: int = MAX_OUTPUT_BYTES) -> str:
+    """Serialise tool output and enforce a hard byte ceiling so large Odoo pages cannot blow LLM context."""
+    raw = _dumps(data)
+    if len(raw.encode("utf-8")) <= max_bytes:
+        return raw
+    compact = json.dumps(data, separators=(",", ":"), default=str, ensure_ascii=False)
+    if len(compact.encode("utf-8")) <= max_bytes:
+        return compact
+    if isinstance(data, list):
+        kept: List[Any] = []
+        for item in data:
+            candidate = json.dumps(
+                {
+                    "records": [*kept, item],
+                    "_truncated": True,
+                    "_returned": len(kept) + 1,
+                    "_total_in_page": len(data),
+                    "_hint": "Response exceeded 60KB budget. Pass explicit 'fields' or reduce 'limit'.",
+                },
+                separators=(",", ":"),
+                default=str,
+                ensure_ascii=False,
+            )
+            if len(candidate.encode("utf-8")) > max_bytes:
+                break
+            kept.append(item)
+        return json.dumps(
+            {
+                "records": kept,
+                "_truncated": True,
+                "_returned": len(kept),
+                "_total_in_page": len(data),
+                "_hint": "Response exceeded 60KB budget. Pass explicit 'fields' or reduce 'limit'.",
+            },
+            separators=(",", ":"),
+            default=str,
+            ensure_ascii=False,
+        )
+    return compact[: max_bytes - 64] + '..."_truncated_bytes":true}'
 
 
 def _compact(value: Any) -> Any:
@@ -202,7 +260,7 @@ async def _execute_approved(cfg: Config, guard: GuardClient, store: PendingStore
         "risk_level": decision["risk"],
         "intent_id": intent_id,
         "approved_by": decision.get("approver"),
-        "result": redact_sensitive_output(result),
+        "result": redact_pii_output(redact_sensitive_output(result), cfg.pii_mode),
     }
     if note_ids and not notes_posted:
         summary["audit_note"] = "Not posted in the Chatter: give the AI user an email address in Odoo (run odoo-safe-mcp doctor)."
@@ -219,8 +277,9 @@ def _pending_message(intent_id: str, resp: Dict[str, Any]) -> str:
             "expires_at": resp.get("expires_at"),
             "reason": resp.get("reason"),
             "next_step": (
-                "A human must approve this in Slack/Teams. Nothing has changed in Odoo yet. "
-                f"Call odoo_approval_status(intent_id='{intent_id}') later to execute it once approved."
+                "A human must approve this in Slack/Teams/Telegram/web. Nothing has changed in Odoo yet. "
+                f"Call odoo_approval_status(intent_id='{intent_id}') later to execute it once approved "
+                "(or use odoo_pending_approvals to list pending requests in a new session)."
             ),
         }
     )
@@ -255,7 +314,23 @@ async def _guarded_write(cfg: Config, model: str, method: str, eval_res: RuleEva
             preview = await build_preview(OdooClient(cfg, client), model, method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
         except Exception:
             preview = {"warnings": ["Vista previa no disponible."]}
-        resp = await guard.create_intent(op_json, preview, justification or eval_res.audit_note or "")
+        require_approval_reason = None
+        if (
+            cfg.draft_max_amount is not None
+            and eval_res.level == RiskLevel.YELLOW
+            and isinstance(preview.get("amount_total"), (int, float))
+            and float(preview["amount_total"]) > cfg.draft_max_amount
+        ):
+            require_approval_reason = (
+                f"Draft total ({float(preview['amount_total']):.2f}) exceeds ODOO_DRAFT_MAX_AMOUNT ({cfg.draft_max_amount:.2f})."
+            )
+            preview.setdefault("warnings", []).append(require_approval_reason)
+        resp = await guard.create_intent(
+            op_json,
+            preview,
+            justification or eval_res.audit_note or "",
+            require_approval_reason=require_approval_reason,
+        )
         intent_id = str(resp.get("intent_id") or "")
         if not valid_intent_id(intent_id):
             raise OdooSafeError("Pro Guard returned an invalid intent id. Nothing was executed.")
@@ -311,7 +386,7 @@ async def _run_call(model: str, method: str, args: Any = None, kwargs: Any = Non
             result = await _execute_local_odoo(cfg, model, method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
         except Exception as exc:
             raise OdooSafeError(f"❌ Error querying Odoo: {sanitize_error(str(exc), cfg)}") from exc
-        return redact_sensitive_output(result)
+        return redact_pii_output(redact_sensitive_output(result), cfg.pii_mode)
 
     if eval_res.requires_guard_proxy:
         try:
@@ -336,6 +411,7 @@ async def odoo_search(
     limit: int = 20,
     offset: int = 0,
     order: Optional[str] = None,
+    all_fields: bool = False,
 ) -> str:
     """
     Search Odoo records and return their fields (search_read). Read-only.
@@ -343,25 +419,31 @@ async def odoo_search(
     Args:
         model: Technical model, e.g. 'res.partner', 'sale.order', 'account.move'.
         domain: Odoo domain, e.g. [["state", "=", "sale"], ["amount_total", ">", 1000]].
-        fields: Fields to return. Use odoo_describe_model to discover them; omit for all.
+        fields: Fields to return. Use odoo_describe_model to discover them; defaults to a lightweight profile on common models.
         limit: Max records (default 20, max 200).
         offset: Records to skip, for pagination.
         order: Sort, e.g. 'date_order desc'.
+        all_fields: Set True only when you explicitly need all fields outside the lightweight default profile.
     """
     kwargs: Dict[str, Any] = {"limit": max(1, min(int(limit or 20), 200)), "offset": max(0, int(offset or 0))}
+    norm_model = (model or "").strip().lower()
     if fields:
         kwargs["fields"] = fields
+    elif not all_fields and norm_model in DEFAULT_FIELD_PROFILES:
+        kwargs["fields"] = list(DEFAULT_FIELD_PROFILES[norm_model])
+    else:
+        kwargs["context"] = {"bin_size": True}
     if order:
         kwargs["order"] = order
     result = await _run_call(model, "search_read", [_normalize_list(domain)], kwargs)
-    return _dumps(_compact(result))
+    return _dumps_bounded(_compact(result))
 
 
 @_tool(READ_ONLY)
 async def odoo_read(model: str, ids: List[int], fields: Optional[List[str]] = None) -> str:
     """Read specific Odoo records by id. Read-only."""
-    kwargs = {"fields": fields} if fields else {}
-    return _dumps(_compact(await _run_call(model, "read", [ids[:200]], kwargs)))
+    kwargs: Dict[str, Any] = {"fields": fields} if fields else {"context": {"bin_size": True}}
+    return _dumps_bounded(_compact(await _run_call(model, "read", [ids[:200]], kwargs)))
 
 
 @_tool(READ_ONLY)
@@ -390,8 +472,17 @@ async def odoo_aggregate(
 
 
 @_tool(READ_ONLY)
-async def odoo_describe_model(model: str) -> str:
-    """Describe a model's fields (label, type, relation, required, readonly). Use before writing."""
+async def odoo_describe_model(
+    model: str,
+    search: Optional[str] = None,
+    include_readonly: bool = True,
+) -> str:
+    """
+    Describe a model's fields (label, type, relation, required, readonly). Use before writing.
+
+    Pass `search` (e.g. 'x_' or 'iban') to filter matching technical names or labels, or `include_readonly=False`
+    to show only writable fields.
+    """
     cfg = get_config()
     key = (cfg.url, cfg.db, model)
     if key not in _SCHEMA_CACHE:
@@ -405,7 +496,16 @@ async def odoo_describe_model(model: str) -> str:
                 entry["selection"] = entry["selection"][:30]
             schema[name] = entry
         _SCHEMA_CACHE[key] = schema
-    return _dumps(_SCHEMA_CACHE[key])
+    result = _SCHEMA_CACHE[key]
+    if search or not include_readonly:
+        needle = (search or "").strip().lower()
+        result = {
+            name: meta
+            for name, meta in result.items()
+            if (include_readonly or not meta.get("readonly"))
+            and (not needle or needle in name.lower() or needle in str(meta.get("string", "")).lower())
+        }
+    return _dumps_bounded(result)
 
 
 COMMON_MODELS = [
@@ -501,6 +601,24 @@ async def odoo_approval_status(intent_id: str) -> str:
         raise
     except (GuardError, DecisionError, PendingStoreError) as exc:
         raise OdooSafeError(sanitize_error(str(exc), cfg)) from exc
+
+
+@_tool(READ_ONLY)
+async def odoo_pending_approvals() -> str:
+    """
+    List critical Odoo changes proposed from this machine that have not been executed yet.
+
+    Useful when resuming in a new chat after a human approved an operation in Slack, Teams, Telegram, or web.
+    """
+    cfg = get_config()
+    items = PendingStore(cfg.state_dir).list_pending()
+    return _dumps(
+        {
+            "pending": items,
+            "count": len(items),
+            "next_step": "Call odoo_approval_status(intent_id=...) for any request once a human has approved it.",
+        }
+    )
 
 
 def main():  # pragma: no cover - kept for configs that point at odoo_safe_mcp.server:main

@@ -69,7 +69,18 @@ class OdooClient:
 
     async def execute(self, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]) -> Any:
         uid = await self.uid()
-        call = [self.cfg.db, uid, self.cfg.api_key, model, method, args, kwargs]
+        exec_kwargs = dict(kwargs or {})
+        if self.cfg.allowed_company_ids:
+            ctx = dict(exec_kwargs.get("context") or {}) if isinstance(exec_kwargs.get("context"), dict) else {}
+            allowed = list(self.cfg.allowed_company_ids)
+            requested = ctx.get("allowed_company_ids")
+            if isinstance(requested, (list, tuple)):
+                filtered = [cid for cid in requested if isinstance(cid, int) and not isinstance(cid, bool) and cid in allowed]
+                ctx["allowed_company_ids"] = filtered or allowed
+            else:
+                ctx["allowed_company_ids"] = allowed
+            exec_kwargs["context"] = ctx
+        call = [self.cfg.db, uid, self.cfg.api_key, model, method, args, exec_kwargs]
         try:
             return await jsonrpc(self.client, self.cfg.url, "object", "execute_kw", call)
         except OdooRPCError as exc:
@@ -80,7 +91,7 @@ class OdooClient:
             # Odoo 20 replaced read_group(domain, fields, groupby, ...) by read_group(domain, groupby, aggregates)
             # returning tuples (verified on 20.0): translate to formatted_read_group, which still returns dicts.
             if method == "read_group" and "unexpected keyword argument" in str(exc):
-                return await self.execute(model, "formatted_read_group", [], legacy_read_group_kwargs(args, kwargs))
+                return await self.execute(model, "formatted_read_group", [], legacy_read_group_kwargs(args, exec_kwargs))
             raise
 
     async def post_note(self, model: str, record_id: int, html: str) -> bool:

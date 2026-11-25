@@ -48,6 +48,37 @@ def _ids_from_args(args: List[Any]) -> List[int] | None:
     return None
 
 
+def _estimate_create_amount(model: str, vals_list: List[Any]) -> float | None:
+    """Estimate total amount from create payloads (sale.order / purchase.order) for threshold checks."""
+    if model not in ("sale.order", "purchase.order"):
+        return None
+    total = 0.0
+    found = False
+    for vals in vals_list:
+        if not isinstance(vals, dict):
+            continue
+        direct = vals.get("amount_total")
+        if isinstance(direct, (int, float)) and not isinstance(direct, bool):
+            total += float(direct)
+            found = True
+            continue
+        lines = vals.get("order_line")
+        if not isinstance(lines, (list, tuple)):
+            continue
+        for cmd in lines:
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 3 and isinstance(cmd[2], dict):
+                line = cmd[2]
+                qty = line.get("product_uom_qty") if line.get("product_uom_qty") is not None else line.get("product_qty", 1)
+                price = line.get("price_unit", 0)
+                discount = line.get("discount", 0) or 0
+                try:
+                    total += float(qty) * float(price) * (1.0 - float(discount) / 100.0)
+                    found = True
+                except (TypeError, ValueError):
+                    continue
+    return round(total, 2) if found else None
+
+
 async def build_preview(odoo: OdooClient, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]) -> Dict[str, Any]:
     preview: Dict[str, Any] = {
         "summary": "",
@@ -80,6 +111,9 @@ async def build_preview(odoo: OdooClient, model: str, method: str, args: List[An
         vals_list = vals_list if isinstance(vals_list, list) else [vals_list] if isinstance(vals_list, dict) else []
         preview["record_count"] = len(vals_list)
         preview["summary"] = f"{verb} {len(vals_list)} registro(s) de {label}"
+        estimated = _estimate_create_amount(model, vals_list)
+        if estimated is not None:
+            preview["amount_total"] = estimated
         first = redact_sensitive_output(vals_list[0]) if vals_list and isinstance(vals_list[0], dict) else {}
         for name, value in list(first.items())[:MAX_CHANGES]:
             label_ = (fields.get(name) or {}).get("string") or name

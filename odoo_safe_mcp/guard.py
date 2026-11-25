@@ -64,18 +64,23 @@ class GuardClient:
             raise GuardError(template.format(status=resp.status_code, error=data.get("error") or data))
         return data
 
-    async def create_intent(self, op_json: str, preview: Dict[str, Any], justification: str) -> Dict[str, Any]:
-        return await self._request(
-            "POST",
-            "/v2/intents",
-            {
-                "odoo_db": self.cfg.db,
-                "op_json": op_json,
-                "op_sha256": sha256_hex(op_json),
-                "preview": preview,
-                "agent_justification": justification,
-            },
-        )
+    async def create_intent(
+        self,
+        op_json: str,
+        preview: Dict[str, Any],
+        justification: str,
+        require_approval_reason: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "odoo_db": self.cfg.db,
+            "op_json": op_json,
+            "op_sha256": sha256_hex(op_json),
+            "preview": preview,
+            "agent_justification": justification,
+        }
+        if require_approval_reason:
+            payload["require_approval_reason"] = require_approval_reason
+        return await self._request("POST", "/v2/intents", payload)
 
     async def get_intent(self, intent_id: str) -> Dict[str, Any]:
         return await self._request("GET", f"/v2/intents/{intent_id}")
