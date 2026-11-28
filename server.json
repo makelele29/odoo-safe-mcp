@@ -7,12 +7,12 @@
     "url": "https://github.com/makelele29/odoo-safe-mcp",
     "source": "github"
   },
-  "version": "3.1.0",
+  "version": "3.1.1",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "odoo-safe-mcp",
-      "version": "3.1.0",
+      "version": "3.1.1",
       "transport": {
         "type": "stdio"
       },

@@ -1,5 +1,17 @@
 # Changelog
 
+## 3.1.1 — 2026-11-25
+
+### Security Hardening
+- **Draft Thresholds (Fail-Closed):** Ignored untrusted client `amount_total` overrides on `create`, disallowed negative/over-100% discount netting, looked up `product.product.list_price` when `price_unit` is omitted, flagged uncertain totals fail-closed to human approval, supported `ODOO_DRAFT_MAX_AMOUNT=0` (approve every draft), and added `account.payment.amount` + `partner_id` support in previews.
+- **GDPR PII Shield (`mask`/`strict`):** Redacted `__domain` in `read_group`/`formatted_read_group`, scrubbed emails/IBANs in `display_name`/`name_search`/`sanitize_error`, added coverage for `email_formatted`, `contact_address*`, `bank_account_id`, `emergency_*`, `x_dni`/`x_nif`/`x_iban*`, applied PII redaction before sending previews out of the machine, and blocked PII domain/groupby/order oracles when `ODOO_PII_MODE != off`.
+- **SEC-07 & Model Hardening:** Extended credential oracle inspection to positional args (`name_search`, `read_group`, `formatted_read_group`, `search`, `search_read`), added `formatted_read_group` (Odoo 19/20) to `GREEN_METHODS`, forbade `certificate.key` (VeriFactu PEM keys), `auth.oauth.provider`, `account.online.link`, `res.users.settings`, and mutations on `base.import.module`.
+- **Multi-Company Fail-Closed:** Non-empty invalid `ODOO_ALLOWED_COMPANY_IDS` now fails closed (`PermissionError`), strips out-of-scope `force_company`/`company_id`/`default_company_id` from RPC context, and blocks out-of-scope `vals["company_id"]` on writes.
+
+### Bug Fixes
+- Fixed `_dumps_bounded` on `dict` outputs (e.g. `odoo_describe_model` on 150+ field models with UTF-8 accents) so it always emits valid JSON within the 60 KB byte budget, and applied `_dumps_bounded` to `odoo_aggregate` and `odoo_execute_kw`.
+- Added automatic schema-aware fallback in `odoo_search` when a curated `DEFAULT_FIELD_PROFILES` field does not exist (e.g. Odoo 16 `project.task.state` or instances without `stock`/`account`).
+
 ## 3.1.0 — 2026-11-25
 
 ### Security & Privacy

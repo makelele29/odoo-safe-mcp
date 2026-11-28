@@ -68,9 +68,10 @@ class OdooClient:
         return await jsonrpc(self.client, self.cfg.url, "common", "version", [])
 
     async def execute(self, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        uid = await self.uid()
         exec_kwargs = dict(kwargs or {})
         if self.cfg.allowed_company_ids:
+            if -1 in self.cfg.allowed_company_ids:
+                raise PermissionError("Invalid ODOO_ALLOWED_COMPANY_IDS configuration (fail-closed).")
             ctx = dict(exec_kwargs.get("context") or {}) if isinstance(exec_kwargs.get("context"), dict) else {}
             allowed = list(self.cfg.allowed_company_ids)
             requested = ctx.get("allowed_company_ids")
@@ -79,7 +80,14 @@ class OdooClient:
                 ctx["allowed_company_ids"] = filtered or allowed
             else:
                 ctx["allowed_company_ids"] = allowed
+            for ck in ("force_company", "company_id", "default_company_id"):
+                if ck in ctx:
+                    cval = ctx.get(ck)
+                    if isinstance(cval, int) and not isinstance(cval, bool) and cval in allowed:
+                        continue
+                    ctx.pop(ck, None)
             exec_kwargs["context"] = ctx
+        uid = await self.uid()
         call = [self.cfg.db, uid, self.cfg.api_key, model, method, args, exec_kwargs]
         try:
             return await jsonrpc(self.client, self.cfg.url, "object", "execute_kw", call)

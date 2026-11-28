@@ -32,6 +32,7 @@ GREEN_METHODS = {
     "search_read",
     "fields_get",
     "read_group",
+    "formatted_read_group",
     "name_search",
     "name_get",
     "search_count",
@@ -45,12 +46,16 @@ GREEN_METHODS = {
 # Models where ANY access (even READ) is strictly forbidden to prevent credential/secret exfiltration
 READ_AND_WRITE_FORBIDDEN_MODELS = {
     "res.users",
+    "res.users.settings",
     "res.apikeys",  # legacy alias kept for backward compatibility
     "res.users.apikeys",
     "res.users.apikeys.description",
     "res.users.apikeys.show",
     "res.users.identitycheck",
+    "auth.oauth.provider",
     "auth.totp.device",
+    "account.online.link",
+    "certificate.key",
     "change.password.wizard",
     "change.password.user",
     "change.password.own",
@@ -72,6 +77,7 @@ PROTECTED_SYSTEM_MODELS = READ_AND_WRITE_FORBIDDEN_MODELS | {
     "ir.model.access",
     "ir.rule",
     "ir.module.module",
+    "base.import.module",
     "base.module.update",
     "base.module.upgrade",
     "base.module.uninstall",
@@ -122,9 +128,12 @@ PII_MASKED_VALUE = "[MASKED_PII]"
 PII_FIELD_NAMES = {
     "vat",
     "partner_vat",
+    "vat_number",
     "email",
     "email_normalized",
     "email_from",
+    "email_formatted",
+    "reply_to",
     "private_email",
     "work_email",
     "phone",
@@ -133,8 +142,11 @@ PII_FIELD_NAMES = {
     "private_phone",
     "work_phone",
     "mobile_phone",
+    "emergency_phone",
+    "emergency_contact",
     "acc_number",
     "sanitized_acc_number",
+    "bank_account_id",
     "iban",
     "wage",
     "ssnid",
@@ -144,13 +156,19 @@ PII_FIELD_NAMES = {
     "birthday",
     "street",
     "street2",
+    "contact_address",
+    "contact_address_complete",
 }
 
 PII_FIELD_PATTERN = re.compile(
-    r"^(?:.*_)?(vat|iban|acc_number|wage|salary|ssnid|sinid|passport_id|identification_id|birthday)$"
-    r"|^(?:work_|private_|partner_)?(email|email_normalized|email_from|phone|phone_sanitized|mobile|mobile_phone|street|street2)$",
+    r"^(?:.*_)?(vat|vat_number|iban|acc_number|bank_account_id|wage|salary|ssnid|sinid|passport_id|identification_id|birthday|emergency_phone|emergency_contact)$"
+    r"|^(?:work_|private_|partner_)?(email|email_normalized|email_from|email_formatted|reply_to|phone|phone_sanitized|mobile|mobile_phone|street|street2|contact_address|contact_address_complete)$"
+    r"|^x_.*(?:dni|nif|nie|email|phone|mobile|iban|vat|ssn|salary|wage)",
     re.IGNORECASE,
 )
+
+_EMAIL_TEXT_RE = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+_IBAN_TEXT_RE = re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}(?:[ ]?[A-Z0-9]{1,4})?\b")
 
 # Context keys a YELLOW create may carry. Anything else is dropped: keys such as
 # 'tracking_disable' or 'mail_notrack' would silence the audit trail in the Chatter.
@@ -407,35 +425,91 @@ def _domain_has_sensitive_path(domain: Any) -> Optional[str]:
     return None
 
 
-def _find_sensitive_read_oracle(method: str, args: List[Any], kwargs: Dict[str, Any]) -> Optional[str]:
-    """Block boolean-oracle attacks filtering/grouping/ordering by credential fields."""
-    if method != "read" and args:
-        hit = _domain_has_sensitive_path(args[0])
-        if hit:
-            return hit
+def _iter_oracle_fields_and_domains(method: str, args: List[Any], kwargs: Dict[str, Any]):
+    """Yield (kind, value) pairs covering domain, groupby, aggregates, and order across positional & keyword args."""
+    if method == "name_search":
+        if len(args) > 1 and isinstance(args[1], (list, tuple)):
+            yield ("domain", args[1])
+        if "args" in kwargs:
+            yield ("domain", kwargs.get("args"))
+    elif method != "read" and args:
+        yield ("domain", args[0])
     if "domain" in kwargs:
-        hit = _domain_has_sensitive_path(kwargs.get("domain"))
-        if hit:
-            return hit
-    groupby = kwargs.get("groupby")
-    if isinstance(groupby, str):
-        hit = _has_sensitive_field_path(groupby)
-        if hit:
-            return hit
-    elif isinstance(groupby, (list, tuple)):
-        for item in groupby:
-            hit = _has_sensitive_field_path(item)
-            if hit:
-                return hit
+        yield ("domain", kwargs.get("domain"))
+
+    if method in ("read_group", "formatted_read_group"):
+        if len(args) > 1 and isinstance(args[1], (list, tuple)):
+            for item in args[1]:
+                yield ("field", item)
+        if len(args) > 2:
+            gb = args[2]
+            if isinstance(gb, str):
+                yield ("field", gb)
+            elif isinstance(gb, (list, tuple)):
+                for item in gb:
+                    yield ("field", item)
+        if len(args) > 5 and isinstance(args[5], str):
+            yield ("order", args[5])
+
+    if method == "search" and len(args) > 3 and isinstance(args[3], str):
+        yield ("order", args[3])
+    if method == "search_read" and len(args) > 4 and isinstance(args[4], str):
+        yield ("order", args[4])
+
+    for list_key in ("groupby", "aggregates"):
+        val = kwargs.get(list_key)
+        if isinstance(val, str):
+            yield ("field", val)
+        elif isinstance(val, (list, tuple)):
+            for item in val:
+                yield ("field", item)
+
     for order_key in ("order", "orderby"):
         order_val = kwargs.get(order_key)
         if isinstance(order_val, str):
-            for clause in order_val.split(","):
+            yield ("order", order_val)
+
+
+def _find_oracle_by_predicate(
+    method: str,
+    args: List[Any],
+    kwargs: Dict[str, Any],
+    path_checker,
+) -> Optional[str]:
+    for kind, value in _iter_oracle_fields_and_domains(method, args, kwargs):
+        if kind == "domain":
+            hit = _domain_matches_path(value, path_checker)
+            if hit:
+                return hit
+        elif kind == "field":
+            hit = path_checker(value)
+            if hit:
+                return hit
+        elif kind == "order":
+            for clause in value.split(","):
                 col = clause.strip().split()[0] if clause.strip() else ""
-                hit = _has_sensitive_field_path(col)
+                hit = path_checker(col)
                 if hit:
                     return hit
     return None
+
+
+def _domain_matches_path(domain: Any, path_checker) -> Optional[str]:
+    if not isinstance(domain, (list, tuple)):
+        return None
+    if len(domain) == 3 and isinstance(domain[0], str) and domain[0] not in ("&", "|", "!"):
+        return path_checker(domain[0])
+    for item in domain:
+        if isinstance(item, (list, tuple)):
+            hit = _domain_matches_path(item, path_checker)
+            if hit:
+                return hit
+    return None
+
+
+def _find_sensitive_read_oracle(method: str, args: List[Any], kwargs: Dict[str, Any]) -> Optional[str]:
+    """Block boolean-oracle attacks filtering/grouping/ordering by credential fields."""
+    return _find_oracle_by_predicate(method, args, kwargs, _has_sensitive_field_path)
 
 
 def _sanitize_green_read_args(method: str, args: List[Any]) -> List[Any]:
@@ -493,9 +567,59 @@ def _is_pii_field(name: Any) -> bool:
     return clean in PII_FIELD_NAMES or bool(PII_FIELD_PATTERN.match(clean))
 
 
+def _has_pii_field_path(path: Any) -> Optional[str]:
+    """Return the first PII dotted field segment in a field expression (e.g. 'partner_id.vat')."""
+    if not isinstance(path, str):
+        return None
+    base = path.split(":", 1)[0].strip()
+    if not base:
+        return None
+    for part in base.split("."):
+        if _is_pii_field(part):
+            return base
+    return None
+
+
+def _domain_has_pii_path(domain: Any) -> Optional[str]:
+    return _domain_matches_path(domain, _has_pii_field_path)
+
+
+def find_pii_read_oracle(method: str, args: List[Any], kwargs: Dict[str, Any]) -> Optional[str]:
+    """Detect domain, groupby, or order clauses targeting GDPR PII fields."""
+    return _find_oracle_by_predicate(method, args, kwargs, _has_pii_field_path)
+
+
+def scrub_pii_text(text: str, mode: str = "strict") -> str:
+    """Redact or mask raw emails and IBANs inside free-form text (e.g. display_name, error strings)."""
+    norm_mode = (mode or "off").strip().lower()
+    if norm_mode not in ("mask", "strict") or not isinstance(text, str) or not text:
+        return text
+
+    def _repl_email(m: re.Match) -> str:
+        if norm_mode == "strict":
+            return PII_REDACTED_VALUE
+        local, domain = m.group(0).split("@", 1)
+        prefix = local[0] if local else "*"
+        return f"{prefix}***@{domain}"
+
+    def _repl_iban(m: re.Match) -> str:
+        s = m.group(0)
+        if norm_mode == "strict":
+            return PII_REDACTED_VALUE
+        compact = s.replace(" ", "")
+        return f"{compact[:2]}{'*' * min(8, max(2, len(compact) - 4))}{compact[-2:]}"
+
+    out = _EMAIL_TEXT_RE.sub(_repl_email, text)
+    return _IBAN_TEXT_RE.sub(_repl_iban, out)
+
+
 def _mask_pii_value(value: Any, mode: str) -> Any:
     if value is None or value is False or value == "":
         return value
+    if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], int) and isinstance(value[1], str):
+        if mode == "strict":
+            return [value[0], PII_REDACTED_VALUE]
+        return [value[0], _mask_pii_value(value[1], mode)]
     if mode == "strict":
         return PII_REDACTED_VALUE
     if isinstance(value, bool):
@@ -505,6 +629,8 @@ def _mask_pii_value(value: Any, mode: str) -> Any:
         if not s:
             return value
         if "@" in s:
+            if "<" in s and ">" in s:
+                return scrub_pii_text(s, mode)
             local, domain = s.split("@", 1)
             prefix = local[0] if local else "*"
             return f"{prefix}***@{domain}"
@@ -520,16 +646,33 @@ def redact_pii_output(result: Any, mode: str = "off") -> Any:
     if norm_mode not in ("mask", "strict"):
         return result
     if isinstance(result, list):
-        return [redact_pii_output(item, norm_mode) for item in result]
+        # Scrub [id, label] pairs returned by name_search / name_get
+        out_list = []
+        for item in result:
+            if (
+                isinstance(item, (list, tuple))
+                and len(item) == 2
+                and isinstance(item[0], int)
+                and isinstance(item[1], str)
+            ):
+                scrubbed = scrub_pii_text(item[1], norm_mode)
+                out_list.append([item[0], scrubbed] if isinstance(item, list) else (item[0], scrubbed))
+            else:
+                out_list.append(redact_pii_output(item, norm_mode))
+        return out_list
     if isinstance(result, dict):
-        return {
-            key: (
-                _mask_pii_value(value, norm_mode)
-                if _is_pii_field(str(key))
-                else redact_pii_output(value, norm_mode)
-            )
-            for key, value in result.items()
-        }
+        out: Dict[str, Any] = {}
+        for key, value in result.items():
+            key_str = str(key)
+            if _is_pii_field(key_str):
+                out[key] = _mask_pii_value(value, norm_mode)
+            elif key_str == "__domain" and _domain_has_pii_path(value):
+                out[key] = PII_REDACTED_VALUE if norm_mode == "strict" else PII_MASKED_VALUE
+            elif key_str in ("display_name", "name") and isinstance(value, str):
+                out[key] = scrub_pii_text(value, norm_mode)
+            else:
+                out[key] = redact_pii_output(value, norm_mode)
+        return out
     return result
 
 

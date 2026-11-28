@@ -33,7 +33,10 @@
   },
   "tables": {
     "forbidden_models": [
+      "account.online.link",
+      "auth.oauth.provider",
       "auth.totp.device",
+      "certificate.key",
       "change.password.own",
       "change.password.user",
       "change.password.wizard",
@@ -50,10 +53,12 @@
       "res.users.apikeys",
       "res.users.apikeys.description",
       "res.users.apikeys.show",
-      "res.users.identitycheck"
+      "res.users.identitycheck",
+      "res.users.settings"
     ],
     "protected_system_models": [
       "base.automation",
+      "base.import.module",
       "base.module.uninstall",
       "base.module.update",
       "base.module.upgrade",
@@ -79,6 +84,7 @@
       "default_get",
       "fields_get",
       "fields_view_get",
+      "formatted_read_group",
       "get_views",
       "load_views",
       "name_get",
@@ -390,6 +396,9 @@
     {"id": "x2many.second-record-in-vals-list", "model": "sale.order", "method": "create", "args": [[{"partner_id": 1}, {"partner_id": 2, "order_line": [[4, 34]]}]], "kwargs": {}, "expected_level": "RED"},
     {"id": "x2many.crm-custom-one2many-update", "model": "crm.lead", "method": "create", "args": [{"name": "x", "x_line_ids": [[1, 3, {"name": "y"}]]}], "kwargs": {}, "expected_level": "RED"},
     {"id": "x2many.bad-context-and-commands", "model": "sale.order", "method": "create", "args": [{"order_line": [[4, 34]]}], "kwargs": {"context": [["tracking_disable", true]]}, "expected_level": "RED"},
-    {"id": "x2many.uppercase-model-still-checked", "model": "SALE.ORDER", "method": "Create", "args": [{"order_line": [[4, 34]]}], "kwargs": {}, "expected_level": "RED"}
+    {"id": "x2many.uppercase-model-still-checked", "model": "SALE.ORDER", "method": "Create", "args": [{"order_line": [[4, 34]]}], "kwargs": {}, "expected_level": "RED"},
+    {"id": "odoo20.formatted-read-group", "model": "sale.order", "method": "formatted_read_group", "args": [[]], "kwargs": {"groupby": ["state"], "aggregates": ["__count"]}, "expected_level": "GREEN"},
+    {"id": "forbidden.certificate-key-read", "model": "certificate.key", "method": "search_read", "args": [[]], "kwargs": {}, "expected_level": "FORBIDDEN"},
+    {"id": "forbidden.base-import-module-write", "model": "base.import.module", "method": "create", "args": [{"module_file": "x"}], "kwargs": {}, "expected_level": "FORBIDDEN"}
   ]
 }

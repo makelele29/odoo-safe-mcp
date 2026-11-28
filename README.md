@@ -45,8 +45,6 @@ AI agent ──MCP──► odoo-safe-mcp (your machine, holds the Odoo API key)
 
 A compromised cloud cannot make your machine run anything it did not propose itself. No tunnels: it
 works with Odoo Online (**Custom plan**, which enables external API access), Odoo.sh and on-premise.
-Want 100% in-Odoo enforcement with native mobile approvals, zero cloud dependency and one-time pricing?
-Check out our companion Odoo module **`safe_ai_guard`** on the Odoo Apps Store.
 
 ## Quickstart (3 minutes)
 
@@ -69,7 +67,7 @@ Manual configuration (`claude_desktop_config.json` or `.cursor/mcp.json`):
   "mcpServers": {
     "odoo": {
       "command": "uvx",
-      "args": ["odoo-safe-mcp@3.0.0"],
+      "args": ["odoo-safe-mcp@3.1.1"],
       "env": {
         "ODOO_URL": "https://your-company.odoo.com",
         "ODOO_DB": "your-database",

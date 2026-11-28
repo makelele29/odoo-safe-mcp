@@ -27,8 +27,11 @@ def _parse_pii_mode(raw: str) -> str:
 
 
 def _parse_company_ids(raw: str) -> Tuple[int, ...]:
+    text = (raw or "").strip()
+    if not text:
+        return ()
     ids = []
-    for part in (raw or "").split(","):
+    for part in text.split(","):
         token = part.strip()
         if not token:
             continue
@@ -38,7 +41,8 @@ def _parse_company_ids(raw: str) -> Tuple[int, ...]:
             continue
         if cid > 0 and cid not in ids:
             ids.append(cid)
-    return tuple(ids)
+    # Fail-closed sentinel when ODOO_ALLOWED_COMPANY_IDS is non-empty yet contains no valid positive ID
+    return tuple(ids) if ids else (-1,)
 
 
 def _parse_positive_float(raw: str) -> Optional[float]:
@@ -47,7 +51,7 @@ def _parse_positive_float(raw: str) -> Optional[float]:
         return None
     try:
         val = float(token)
-        return val if val > 0 else None
+        return val if val >= 0 else None
     except ValueError:
         return None
 
@@ -123,10 +127,14 @@ def get_config() -> Config:
 
 
 def sanitize_error(msg: str, cfg: Config) -> str:
-    """Scrub API keys or licence tokens from error strings before they reach the LLM."""
+    """Scrub API keys, licence tokens, and raw PII from error strings before they reach the LLM."""
     sanitized = str(msg)
     for secret in (cfg.api_key, cfg.guard_key):
         secret = (secret or "").strip()
         if secret and len(secret) >= 4:
             sanitized = sanitized.replace(secret, "[REDACTED_SECRET]")
+    if cfg.pii_mode != "off":
+        from odoo_safe_mcp.rules import scrub_pii_text
+
+        sanitized = scrub_pii_text(sanitized, cfg.pii_mode)
     return sanitized

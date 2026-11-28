@@ -20,13 +20,14 @@ from odoo_safe_mcp.config import Config, get_config, sanitize_error
 from odoo_safe_mcp.guard import GuardClient, GuardError, canonical_op_json
 from odoo_safe_mcp.odoo import OdooClient, open_client
 from odoo_safe_mcp.pending import PendingStore, PendingStoreError, valid_intent_id
-from odoo_safe_mcp.preview import build_preview
+from odoo_safe_mcp.preview import _estimate_create_amount_details, build_preview
 from odoo_safe_mcp.rules import (
     RiskLevel,
     RuleEvaluationResult,
     _is_sensitive_field,
     evaluate_odoo_call,
     evaluate_rule,
+    find_pii_read_oracle,
     redact_pii_output,
     redact_sensitive_output,
 )
@@ -175,7 +176,47 @@ def _dumps_bounded(data: Any, max_bytes: int = MAX_OUTPUT_BYTES) -> str:
             default=str,
             ensure_ascii=False,
         )
-    return compact[: max_bytes - 64] + '..."_truncated_bytes":true}'
+    if isinstance(data, dict):
+        kept_dict: Dict[str, Any] = {}
+        for k, v in data.items():
+            candidate = json.dumps(
+                {
+                    "fields": {**kept_dict, k: v},
+                    "_truncated": True,
+                    "_returned": len(kept_dict) + 1,
+                    "_total_fields": len(data),
+                    "_hint": "Response exceeded 60KB budget. Pass search=... or include_readonly=False.",
+                },
+                separators=(",", ":"),
+                default=str,
+                ensure_ascii=False,
+            )
+            if len(candidate.encode("utf-8")) > max_bytes:
+                break
+            kept_dict[k] = v
+        return json.dumps(
+            {
+                "fields": kept_dict,
+                "_truncated": True,
+                "_returned": len(kept_dict),
+                "_total_fields": len(data),
+                "_hint": "Response exceeded 60KB budget. Pass search=... or include_readonly=False.",
+            },
+            separators=(",", ":"),
+            default=str,
+            ensure_ascii=False,
+        )
+    # Valid JSON fallback even on huge scalars
+    preview_chars = max(64, (max_bytes - 256) // 4)
+    return json.dumps(
+        {
+            "_truncated": True,
+            "preview": str(data)[:preview_chars],
+            "_hint": "Response exceeded 60KB budget.",
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
 
 
 def _compact(value: Any) -> Any:
@@ -305,26 +346,71 @@ async def _resolve(cfg: Config, guard: GuardClient, store: PendingStore, intent_
         await asyncio.sleep(min(3.0, max(0.0, deadline - time.monotonic())))
 
 
+def _extract_write_dicts(method: str, args: List[Any], kwargs: Dict[str, Any]) -> List[Dict[str, Any]]:
+    raw: Any = None
+    if method == "create":
+        raw = args[0] if args else kwargs.get("vals_list") if "vals_list" in kwargs else kwargs.get("vals")
+    elif method == "write":
+        raw = args[1] if len(args) > 1 else kwargs.get("vals")
+    if isinstance(raw, dict):
+        return [raw]
+    if isinstance(raw, list):
+        return [item for item in raw if isinstance(item, dict)]
+    return []
+
+
+def _check_company_write_lock(cfg: Config, model: str, method: str, args: List[Any], kwargs: Dict[str, Any]) -> None:
+    if not cfg.allowed_company_ids:
+        return
+    if -1 in cfg.allowed_company_ids:
+        raise OdooSafeError("Invalid ODOO_ALLOWED_COMPANY_IDS configuration (fail-closed).")
+    if method not in ("create", "write"):
+        return
+    allowed = set(cfg.allowed_company_ids)
+    for item in _extract_write_dicts(method, args, kwargs):
+        cid = item.get("company_id")
+        if cid is not None and (not isinstance(cid, int) or isinstance(cid, bool) or cid not in allowed):
+            raise OdooSafeError(
+                f"⛔ Multi-Company Isolation: '{model}.{method}' attempted to target company_id={cid!r}, "
+                f"outside ODOO_ALLOWED_COMPANY_IDS={list(cfg.allowed_company_ids)}."
+            )
+
+
 async def _guarded_write(cfg: Config, model: str, method: str, eval_res: RuleEvaluationResult, justification: str) -> str:
-    op_json = canonical_op_json(cfg, model, method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
+    norm_model = (model or "").strip().lower()
+    norm_method = (method or "").strip().lower()
+    op_json = canonical_op_json(cfg, norm_model, norm_method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
     store = PendingStore(cfg.state_dir)
     async with open_client(cfg) as client:
         guard = GuardClient(cfg, client)
         try:
-            preview = await build_preview(OdooClient(cfg, client), model, method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
-        except Exception:
-            preview = {"warnings": ["Vista previa no disponible."]}
-        require_approval_reason = None
-        if (
-            cfg.draft_max_amount is not None
-            and eval_res.level == RiskLevel.YELLOW
-            and isinstance(preview.get("amount_total"), (int, float))
-            and float(preview["amount_total"]) > cfg.draft_max_amount
-        ):
-            require_approval_reason = (
-                f"Draft total ({float(preview['amount_total']):.2f}) exceeds ODOO_DRAFT_MAX_AMOUNT ({cfg.draft_max_amount:.2f})."
+            preview = await build_preview(
+                OdooClient(cfg, client),
+                norm_model,
+                norm_method,
+                eval_res.sanitized_args,
+                eval_res.sanitized_kwargs,
+                pii_mode=cfg.pii_mode,
             )
-            preview.setdefault("warnings", []).append(require_approval_reason)
+        except Exception:
+            preview = {"amount_uncertain": True, "warnings": ["Vista previa no disponible."]}
+        require_approval_reason = None
+        if cfg.draft_max_amount is not None and eval_res.level == RiskLevel.YELLOW:
+            amt = preview.get("amount_total")
+            uncertain = bool(preview.get("amount_uncertain"))
+            has_amt = isinstance(amt, (int, float)) and not isinstance(amt, bool)
+            if uncertain:
+                require_approval_reason = (
+                    f"Draft amount could not be reliably verified against ODOO_DRAFT_MAX_AMOUNT ({cfg.draft_max_amount:.2f}); "
+                    "human approval required (fail-closed)."
+                )
+            elif cfg.draft_max_amount == 0 or (has_amt and float(amt) > cfg.draft_max_amount):
+                amt_txt = f"{float(amt):.2f}" if has_amt else "0.00"
+                require_approval_reason = (
+                    f"Draft total ({amt_txt}) exceeds ODOO_DRAFT_MAX_AMOUNT ({cfg.draft_max_amount:.2f})."
+                )
+            if require_approval_reason:
+                preview.setdefault("warnings", []).append(require_approval_reason)
         resp = await guard.create_intent(
             op_json,
             preview,
@@ -334,7 +420,7 @@ async def _guarded_write(cfg: Config, model: str, method: str, eval_res: RuleEva
         intent_id = str(resp.get("intent_id") or "")
         if not valid_intent_id(intent_id):
             raise OdooSafeError("Pro Guard returned an invalid intent id. Nothing was executed.")
-        store.save(intent_id, op_json, {"model": model, "method": method, "db": cfg.db, "risk": resp.get("risk_level")})
+        store.save(intent_id, op_json, {"model": norm_model, "method": norm_method, "db": cfg.db, "risk": resp.get("risk_level")})
         if resp.get("status") == "APPROVED":
             return await _execute_approved(cfg, guard, store, intent_id, op_json, resp)
         if resp.get("status") != "PENDING_HUMAN_APPROVAL":
@@ -348,26 +434,36 @@ async def _guarded_write(cfg: Config, model: str, method: str, eval_res: RuleEva
 async def _run_call(model: str, method: str, args: Any = None, kwargs: Any = None, justification: str = "") -> Any:
     """Apply the firewall and execute. Returns parsed data for reads, text for writes; raises OdooSafeError."""
     cfg = get_config()
+    norm_model = (model or "").strip().lower()
+    norm_method = (method or "").strip().lower()
     norm_args = _normalize_list(args)
     norm_kwargs = _normalize_dict(kwargs)
 
     # Dry-Run Simulation Mode (allows zero-risk local testing of YELLOW/RED policies)
     if cfg.dry_run:
-        raw = evaluate_odoo_call(model=model, method=method, args=norm_args, kwargs=norm_kwargs)
+        raw = evaluate_odoo_call(model=norm_model, method=norm_method, args=norm_args, kwargs=norm_kwargs)
         if raw.level in (RiskLevel.FORBIDDEN, RiskLevel.BLOCKED):
             raise OdooSafeError(raw.reason)
         if raw.level in (RiskLevel.YELLOW, RiskLevel.RED):
+            sim_level = raw.level.value
+            sim_reason = raw.reason
+            if raw.level == RiskLevel.YELLOW and cfg.draft_max_amount is not None:
+                vals_list = _extract_write_dicts(norm_method, raw.sanitized_args, raw.sanitized_kwargs)
+                est_amt, uncertain = _estimate_create_amount_details(norm_model, vals_list)
+                if uncertain or (est_amt is not None and est_amt > cfg.draft_max_amount):
+                    sim_level = RiskLevel.RED.value
+                    sim_reason = f"Draft total exceeds or cannot be verified against ODOO_DRAFT_MAX_AMOUNT ({cfg.draft_max_amount:.2f})."
             return _dumps(
                 {
                     "status": "DRY_RUN_SIMULATION",
                     "executed_in_odoo": False,
-                    "risk_level": raw.level.value,
-                    "model": model,
-                    "method": method,
+                    "risk_level": sim_level,
+                    "model": norm_model,
+                    "method": norm_method,
                     "sanitized_args": raw.sanitized_args,
                     "sanitized_kwargs": raw.sanitized_kwargs,
                     "audit_note": raw.audit_note,
-                    "policy_decision": raw.reason,
+                    "policy_decision": sim_reason,
                     "message": (
                         "Dry-Run active (ODOO_DRY_RUN=true): No changes were written to Odoo. "
                         "Disable ODOO_DRY_RUN and configure ODOO_SAFE_GUARD_KEY to execute in production."
@@ -375,22 +471,29 @@ async def _run_call(model: str, method: str, args: Any = None, kwargs: Any = Non
                 }
             )
 
-    eval_res = evaluate_rule(model=model, method=method, args=norm_args, kwargs=norm_kwargs, has_pro_license=cfg.has_pro)
+    eval_res = evaluate_rule(model=norm_model, method=norm_method, args=norm_args, kwargs=norm_kwargs, has_pro_license=cfg.has_pro)
     if not eval_res.allowed:
         raise OdooSafeError(eval_res.reason)
+    if cfg.pii_mode != "off" and eval_res.level == RiskLevel.GREEN:
+        pii_hit = find_pii_read_oracle(norm_method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
+        if pii_hit:
+            raise OdooSafeError(
+                f"⛔ GDPR PII SHIELD ({cfg.pii_mode}): Filtering, grouping, or ordering by PII field '{pii_hit}' is blocked."
+            )
+    _check_company_write_lock(cfg, norm_model, norm_method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
     if not cfg.has_credentials:
         raise OdooSafeError(MISSING_CREDENTIALS)
 
     if eval_res.level == RiskLevel.GREEN:
         try:
-            result = await _execute_local_odoo(cfg, model, method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
+            result = await _execute_local_odoo(cfg, norm_model, norm_method, eval_res.sanitized_args, eval_res.sanitized_kwargs)
         except Exception as exc:
             raise OdooSafeError(f"❌ Error querying Odoo: {sanitize_error(str(exc), cfg)}") from exc
         return redact_pii_output(redact_sensitive_output(result), cfg.pii_mode)
 
     if eval_res.requires_guard_proxy:
         try:
-            return await _guarded_write(cfg, model, method, eval_res, justification)
+            return await _guarded_write(cfg, norm_model, norm_method, eval_res, justification)
         except OdooSafeError:
             raise
         except (GuardError, DecisionError, PendingStoreError) as exc:
@@ -427,15 +530,38 @@ async def odoo_search(
     """
     kwargs: Dict[str, Any] = {"limit": max(1, min(int(limit or 20), 200)), "offset": max(0, int(offset or 0))}
     norm_model = (model or "").strip().lower()
+    used_default_profile = False
     if fields:
         kwargs["fields"] = fields
     elif not all_fields and norm_model in DEFAULT_FIELD_PROFILES:
         kwargs["fields"] = list(DEFAULT_FIELD_PROFILES[norm_model])
+        used_default_profile = True
     else:
         kwargs["context"] = {"bin_size": True}
     if order:
         kwargs["order"] = order
-    result = await _run_call(model, "search_read", [_normalize_list(domain)], kwargs)
+    try:
+        result = await _run_call(model, "search_read", [_normalize_list(domain)], kwargs)
+    except OdooSafeError as exc:
+        if not used_default_profile or "invalid field" not in str(exc).lower():
+            raise
+        # Cross-version / uninstalled-module resilience (e.g. Odoo 16 project.task or missing stock/account)
+        fallback_kwargs = {k: v for k, v in kwargs.items() if k != "fields"}
+        try:
+            cfg = get_config()
+            cache_key = (cfg.url, cfg.db, norm_model)
+            schema = _SCHEMA_CACHE.get(cache_key)
+            if schema is None:
+                schema = await _run_call(norm_model, "fields_get", [], {"attributes": ["string", "type"]}) or {}
+                _SCHEMA_CACHE[cache_key] = schema
+            valid = [f for f in DEFAULT_FIELD_PROFILES[norm_model] if f in schema]
+            if valid:
+                fallback_kwargs["fields"] = valid
+            else:
+                fallback_kwargs["context"] = {"bin_size": True}
+        except Exception:
+            fallback_kwargs["context"] = {"bin_size": True}
+        result = await _run_call(model, "search_read", [_normalize_list(domain)], fallback_kwargs)
     return _dumps_bounded(_compact(result))
 
 
@@ -468,7 +594,7 @@ async def odoo_aggregate(
     kwargs: Dict[str, Any] = {"domain": _normalize_list(domain), "fields": fields or [], "groupby": groupby, "lazy": False}
     if limit:
         kwargs["limit"] = int(limit)
-    return _dumps(_compact(await _run_call(model, "read_group", [], kwargs)))
+    return _dumps_bounded(_compact(await _run_call(model, "read_group", [], kwargs)))
 
 
 @_tool(READ_ONLY)
@@ -569,7 +695,7 @@ async def odoo_execute_kw(
         justification: One honest sentence on why (shown to the approver, marked as unverified).
     """
     result = await _run_call(model, method, args, kwargs, justification or "")
-    return result if isinstance(result, str) else _dumps(result)
+    return result if isinstance(result, str) else _dumps_bounded(_compact(result))
 
 
 @_tool(MAY_WRITE)
